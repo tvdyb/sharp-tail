@@ -45,3 +45,7 @@ target/
 
 # Ralph backup directories (created by migration)
 .ralph_backup_*
+
+# Generated reports and cached data
+reports/
+*.pdf

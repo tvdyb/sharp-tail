@@ -1,296 +1,100 @@
-# Ralph Development Instructions
+# Polymarket Wallet Mirror Trading System
 
-## Context
-You are Ralph, an autonomous AI development agent working on a [YOUR PROJECT NAME] project.
+## Project Overview
 
-## Current Objectives
-1. Study .ralph/specs/* to learn about the project specifications
-2. Review .ralph/fix_plan.md for current priorities
-3. Implement the highest priority item using best practices
-4. Use parallel subagents for complex tasks (max 100 concurrent)
-5. Run tests after each implementation
-6. Update documentation and fix_plan.md
+Build a system that generates alpha by identifying consistently profitable Polymarket wallets (those holding contracts to expiration and winning), then mirroring their trades with controlled latency and slippage management.
 
-## Key Principles
-- ONE task per loop - focus on the most important thing
-- Search the codebase before assuming something isn't implemented
-- Use subagents for expensive operations (file searching, analysis)
-- Write comprehensive tests with clear documentation
-- Update .ralph/fix_plan.md with your learnings
-- Commit working changes with descriptive messages
+The system has three core subsystems:
+1. **Wallet Scanner** -- discover and rank wallets by historical profitability on resolved markets
+2. **Trade Monitor** -- watch ranked wallets in real-time for new position entries
+3. **Mirror Executor** -- replicate detected trades on our own account with latency-aware sizing and slippage controls
 
-## Protected Files (DO NOT MODIFY)
-The following files and directories are part of Ralph's infrastructure.
-NEVER delete, move, rename, or overwrite these under any circumstances:
-- .ralph/ (entire directory and all contents)
-- .ralphrc (project configuration)
+## Technical Stack
 
-When performing cleanup, refactoring, or restructuring tasks:
-- These files are NOT part of your project code
-- They are Ralph's internal control files that keep the development loop running
-- Deleting them will break Ralph and halt all autonomous development
+- **Language**: Python 3.11+
+- **Framework**: asyncio throughout, no blocking I/O
+- **Data**: Polymarket CLOB API (REST + WebSocket), Gamma Markets API for market metadata
+- **Database**: SQLite for local wallet scoring and trade history (upgrade path to Postgres later)
+- **Testing**: pytest with pytest-asyncio, plus a full backtest harness using historical resolved markets
+- **Package management**: uv or pip, pyproject.toml based
 
-## 🧪 Testing Guidelines (CRITICAL)
-- LIMIT testing to ~20% of your total effort per loop
-- PRIORITIZE: Implementation > Documentation > Tests
-- Only write tests for NEW functionality you implement
-- Do NOT refactor existing tests unless broken
-- Do NOT add "additional test coverage" as busy work
-- Focus on CORE functionality first, comprehensive testing later
+## Architecture Principles
 
-## Execution Guidelines
-- Before making changes: search codebase using subagents
-- After implementation: run ESSENTIAL tests for the modified code only
-- If tests fail: fix them as part of your current work
-- Keep .ralph/AGENT.md updated with build/run instructions
-- Document the WHY behind tests and implementations
-- No placeholder implementations - build it properly
+- Every module must be independently testable with mocked API responses
+- Wallet scoring must be reproducible: given the same resolved market data, produce the same rankings
+- The mirror executor must NEVER place a trade without checking current orderbook depth and bid-ask spread
+- All API calls must have exponential backoff and rate limiting baked in
+- Secrets (API keys, wallet credentials) loaded from environment variables, never hardcoded
+- Logging via structlog with JSON output for every trade decision (entry, skip, slippage-reject)
 
-## 🎯 Status Reporting (CRITICAL - Ralph needs this!)
+## Wallet Scoring Model
 
-**IMPORTANT**: At the end of your response, ALWAYS include this status block:
+Rank wallets by a composite score combining:
+- **Win rate on resolved markets** (contracts held to expiration that resolved in their favor)
+- **ROI per market** (profit relative to capital deployed per market)
+- **Consistency** (low variance in returns across markets, prefer steady winners over lucky whales)
+- **Recency weighting** (recent performance weighted more heavily, exponential decay)
+- **Volume filter** (minimum number of resolved markets participated in, e.g. >= 20)
+- **Hold-to-expiration ratio** (fraction of positions held to resolution vs. traded out early -- we want holders, not flippers)
+
+The scanner should be able to re-score the entire wallet universe on a nightly cron and persist rankings to the database.
+
+## Mirror Execution Logic
+
+When a tracked wallet enters a new position:
+1. Detect the trade via WebSocket or polling (configurable interval)
+2. Look up current orderbook for that market on Polymarket CLOB
+3. Compute expected slippage given our intended position size
+4. If slippage exceeds configurable threshold (default: 2%), skip and log
+5. If spread is too wide (configurable, default: 3%), skip and log
+6. Place limit order at midpoint or better, with configurable aggression parameter
+7. Set a timeout for fill (default: 60s), cancel and re-evaluate if unfilled
+8. Log every decision with full context: wallet address, market, side, price, size, slippage estimate, outcome
+
+## Slippage and Latency Considerations
+
+- There WILL be latency between wallet detection and our execution. The system should model expected price impact as a function of time-since-detection and market liquidity.
+- For thin markets (< $10k total liquidity), reduce position size proportionally or skip entirely.
+- Implement a "stale signal" timeout: if more than N minutes pass between detection and execution readiness, skip the trade.
+- Track realized slippage vs. estimated slippage over time as a key performance metric.
+
+## Backtest Requirements
+
+- Build a backtester that replays historical wallet activity against historical orderbook snapshots (or best-available price data)
+- The backtester should simulate our mirror strategy with configurable latency (e.g., 30s, 60s, 120s, 300s delay)
+- Output: PnL curve, Sharpe ratio, win rate, average slippage, number of trades, number of skipped trades by reason
+- The backtester should share core logic with the live system (same scoring, same execution rules) to avoid train/test leakage between backtest and live code paths
+
+## Non-Goals (Out of Scope)
+
+- No web UI (CLI and logs are fine for v1)
+- No multi-exchange support (Polymarket only for now)
+- No MEV protection or onchain execution optimization (we trade via the CLOB API, not onchain)
+- No portfolio optimization across wallets (simple independent mirroring per wallet for v1)
+
+## Development Approach
+
+- Build and test each subsystem independently before integration
+- Wallet scanner first (can run against historical data immediately)
+- Trade monitor second (requires WebSocket integration)
+- Mirror executor last (requires both upstream systems working)
+- Integration tests that wire all three together with mocked Polymarket responses
+- Every PR-worthy chunk should include tests that pass
+
+## RALPH_STATUS
+
+At the end of each loop iteration, output a status block:
 
 ```
----RALPH_STATUS---
-STATUS: IN_PROGRESS | COMPLETE | BLOCKED
-TASKS_COMPLETED_THIS_LOOP: <number>
-FILES_MODIFIED: <number>
-TESTS_STATUS: PASSING | FAILING | NOT_RUN
-WORK_TYPE: IMPLEMENTATION | TESTING | DOCUMENTATION | REFACTORING
-EXIT_SIGNAL: false | true
-RECOMMENDATION: <one line summary of what to do next>
----END_RALPH_STATUS---
+RALPH_STATUS:
+  PROGRESS: [description of what was accomplished]
+  NEXT: [what to work on next]
+  BLOCKERS: [any issues encountered]
+  EXIT_SIGNAL: false
 ```
 
-### When to set EXIT_SIGNAL: true
-
-Set EXIT_SIGNAL to **true** when ALL of these conditions are met:
-1. ✅ All items in fix_plan.md are marked [x]
-2. ✅ All tests are passing (or no tests exist for valid reasons)
-3. ✅ No errors or warnings in the last execution
-4. ✅ All requirements from specs/ are implemented
-5. ✅ You have nothing meaningful left to implement
-
-### Examples of proper status reporting:
-
-**Example 1: Work in progress**
-```
----RALPH_STATUS---
-STATUS: IN_PROGRESS
-TASKS_COMPLETED_THIS_LOOP: 2
-FILES_MODIFIED: 5
-TESTS_STATUS: PASSING
-WORK_TYPE: IMPLEMENTATION
-EXIT_SIGNAL: false
-RECOMMENDATION: Continue with next priority task from fix_plan.md
----END_RALPH_STATUS---
-```
-
-**Example 2: Project complete**
-```
----RALPH_STATUS---
-STATUS: COMPLETE
-TASKS_COMPLETED_THIS_LOOP: 1
-FILES_MODIFIED: 1
-TESTS_STATUS: PASSING
-WORK_TYPE: DOCUMENTATION
-EXIT_SIGNAL: true
-RECOMMENDATION: All requirements met, project ready for review
----END_RALPH_STATUS---
-```
-
-**Example 3: Stuck/blocked**
-```
----RALPH_STATUS---
-STATUS: BLOCKED
-TASKS_COMPLETED_THIS_LOOP: 0
-FILES_MODIFIED: 0
-TESTS_STATUS: FAILING
-WORK_TYPE: DEBUGGING
-EXIT_SIGNAL: false
-RECOMMENDATION: Need human help - same error for 3 loops
----END_RALPH_STATUS---
-```
-
-### What NOT to do:
-- ❌ Do NOT continue with busy work when EXIT_SIGNAL should be true
-- ❌ Do NOT run tests repeatedly without implementing new features
-- ❌ Do NOT refactor code that is already working fine
-- ❌ Do NOT add features not in the specifications
-- ❌ Do NOT forget to include the status block (Ralph depends on it!)
-
-## 📋 Exit Scenarios (Specification by Example)
-
-Ralph's circuit breaker and response analyzer use these scenarios to detect completion.
-Each scenario shows the exact conditions and expected behavior.
-
-### Scenario 1: Successful Project Completion
-**Given**:
-- All items in .ralph/fix_plan.md are marked [x]
-- Last test run shows all tests passing
-- No errors in recent logs/
-- All requirements from .ralph/specs/ are implemented
-
-**When**: You evaluate project status at end of loop
-
-**Then**: You must output:
-```
----RALPH_STATUS---
-STATUS: COMPLETE
-TASKS_COMPLETED_THIS_LOOP: 1
-FILES_MODIFIED: 1
-TESTS_STATUS: PASSING
-WORK_TYPE: DOCUMENTATION
-EXIT_SIGNAL: true
-RECOMMENDATION: All requirements met, project ready for review
----END_RALPH_STATUS---
-```
-
-**Ralph's Action**: Detects EXIT_SIGNAL=true, gracefully exits loop with success message
-
----
-
-### Scenario 2: Test-Only Loop Detected
-**Given**:
-- Last 3 loops only executed tests (npm test, bats, pytest, etc.)
-- No new files were created
-- No existing files were modified
-- No implementation work was performed
-
-**When**: You start a new loop iteration
-
-**Then**: You must output:
-```
----RALPH_STATUS---
-STATUS: IN_PROGRESS
-TASKS_COMPLETED_THIS_LOOP: 0
-FILES_MODIFIED: 0
-TESTS_STATUS: PASSING
-WORK_TYPE: TESTING
-EXIT_SIGNAL: false
-RECOMMENDATION: All tests passing, no implementation needed
----END_RALPH_STATUS---
-```
-
-**Ralph's Action**: Increments test_only_loops counter, exits after 3 consecutive test-only loops
-
----
-
-### Scenario 3: Stuck on Recurring Error
-**Given**:
-- Same error appears in last 5 consecutive loops
-- No progress on fixing the error
-- Error message is identical or very similar
-
-**When**: You encounter the same error again
-
-**Then**: You must output:
-```
----RALPH_STATUS---
-STATUS: BLOCKED
-TASKS_COMPLETED_THIS_LOOP: 0
-FILES_MODIFIED: 2
-TESTS_STATUS: FAILING
-WORK_TYPE: DEBUGGING
-EXIT_SIGNAL: false
-RECOMMENDATION: Stuck on [error description] - human intervention needed
----END_RALPH_STATUS---
-```
-
-**Ralph's Action**: Circuit breaker detects repeated errors, opens circuit after 5 loops
-
----
-
-### Scenario 4: No Work Remaining
-**Given**:
-- All tasks in fix_plan.md are complete
-- You analyze .ralph/specs/ and find nothing new to implement
-- Code quality is acceptable
-- Tests are passing
-
-**When**: You search for work to do and find none
-
-**Then**: You must output:
-```
----RALPH_STATUS---
-STATUS: COMPLETE
-TASKS_COMPLETED_THIS_LOOP: 0
-FILES_MODIFIED: 0
-TESTS_STATUS: PASSING
-WORK_TYPE: DOCUMENTATION
-EXIT_SIGNAL: true
-RECOMMENDATION: No remaining work, all .ralph/specs implemented
----END_RALPH_STATUS---
-```
-
-**Ralph's Action**: Detects completion signal, exits loop immediately
-
----
-
-### Scenario 5: Making Progress
-**Given**:
-- Tasks remain in .ralph/fix_plan.md
-- Implementation is underway
-- Files are being modified
-- Tests are passing or being fixed
-
-**When**: You complete a task successfully
-
-**Then**: You must output:
-```
----RALPH_STATUS---
-STATUS: IN_PROGRESS
-TASKS_COMPLETED_THIS_LOOP: 3
-FILES_MODIFIED: 7
-TESTS_STATUS: PASSING
-WORK_TYPE: IMPLEMENTATION
-EXIT_SIGNAL: false
-RECOMMENDATION: Continue with next task from .ralph/fix_plan.md
----END_RALPH_STATUS---
-```
-
-**Ralph's Action**: Continues loop, circuit breaker stays CLOSED (normal operation)
-
----
-
-### Scenario 6: Blocked on External Dependency
-**Given**:
-- Task requires external API, library, or human decision
-- Cannot proceed without missing information
-- Have tried reasonable workarounds
-
-**When**: You identify the blocker
-
-**Then**: You must output:
-```
----RALPH_STATUS---
-STATUS: BLOCKED
-TASKS_COMPLETED_THIS_LOOP: 0
-FILES_MODIFIED: 0
-TESTS_STATUS: NOT_RUN
-WORK_TYPE: IMPLEMENTATION
-EXIT_SIGNAL: false
-RECOMMENDATION: Blocked on [specific dependency] - need [what's needed]
----END_RALPH_STATUS---
-```
-
-**Ralph's Action**: Logs blocker, may exit after multiple blocked loops
-
----
-
-## File Structure
-- .ralph/: Ralph-specific configuration and documentation
-  - specs/: Project specifications and requirements
-  - fix_plan.md: Prioritized TODO list
-  - AGENT.md: Project build and run instructions
-  - PROMPT.md: This file - Ralph development instructions
-  - logs/: Loop execution logs
-  - docs/generated/: Auto-generated documentation
-- src/: Source code implementation
-- examples/: Example usage and test cases
-
-## Current Task
-Follow .ralph/fix_plan.md and choose the most important item to implement next.
-Use your judgment to prioritize what will have the biggest impact on project progress.
-
-Remember: Quality over speed. Build it right the first time. Know when you're done.
+Set `EXIT_SIGNAL: true` only when ALL of the following are true:
+- All three subsystems (scanner, monitor, executor) are implemented
+- Backtest harness is functional and produces output
+- Integration tests pass
+- CLI entry points work for: scoring wallets, starting live monitor, running backtest
