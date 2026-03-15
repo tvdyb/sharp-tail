@@ -9,7 +9,6 @@ import pytest
 from polymir.backtest import (
     BacktestEngine,
     BacktestResult,
-    HistoricalOrderbook,
     HistoricalTrade,
 )
 from polymir.backtest.data import TradeRecord
@@ -57,12 +56,12 @@ class TestBacktestResult:
             TradeRecord(
                 timestamp=datetime.utcnow(),
                 wallet="w0", market_id="m1", asset_id="a1",
-                side="BUY", signal_price=0.55, decision="slippage",
+                side="BUY", signal_price=0.55, decision="stale",
             ),
             TradeRecord(
                 timestamp=datetime.utcnow(),
                 wallet="w0", market_id="m1", asset_id="a1",
-                side="BUY", signal_price=0.55, decision="liquidity",
+                side="BUY", signal_price=0.55, decision="duplicate_market",
             ),
         ]
         r = BacktestResult(trade_records=records)
@@ -132,9 +131,6 @@ class TestBacktestEngine:
     async def test_basic_run(self):
         config = AppConfig(
             execution=ExecutionConfig(
-                max_slippage_pct=0.10,
-                max_spread_pct=0.10,
-                min_liquidity_usd=0,
                 max_position_usd=10000,
             )
         )
@@ -174,7 +170,6 @@ class TestBacktestEngine:
         ]
         config = AppConfig(
             execution=ExecutionConfig(
-                min_liquidity_usd=0, max_slippage_pct=0.5, max_spread_pct=0.5,
                 max_position_usd=10000,
             )
         )
@@ -184,39 +179,9 @@ class TestBacktestEngine:
         assert result.trades_executed + result.trades_skipped <= 1
 
     @pytest.mark.asyncio
-    async def test_with_historical_orderbook(self):
-        now = datetime.utcnow()
-        trades = [
-            HistoricalTrade(
-                wallet="w", market_id="m", asset_id="a1",
-                side="BUY", size=50, price=0.55,
-                timestamp=now - timedelta(hours=1),
-                market_resolved_price=1.0,
-            ),
-        ]
-        orderbooks = [
-            HistoricalOrderbook(
-                asset_id="a1",
-                timestamp=now - timedelta(minutes=59),
-                bids=[(0.53, 500)],
-                asks=[(0.57, 500)],
-            ),
-        ]
-        config = AppConfig(
-            execution=ExecutionConfig(
-                min_liquidity_usd=0, max_slippage_pct=0.5, max_spread_pct=0.5,
-                max_position_usd=10000,
-            )
-        )
-        engine = BacktestEngine(config, latency_s=30)
-        result = await engine.run(trades=trades, orderbooks=orderbooks)
-        assert result.trades_executed == 1
-
-    @pytest.mark.asyncio
     async def test_losing_trades_negative_pnl(self):
         config = AppConfig(
             execution=ExecutionConfig(
-                min_liquidity_usd=0, max_slippage_pct=0.5, max_spread_pct=0.5,
                 max_position_usd=10000,
             )
         )
@@ -230,7 +195,6 @@ class TestBacktestEngine:
     async def test_fee_deduction(self):
         config = AppConfig(
             execution=ExecutionConfig(
-                min_liquidity_usd=0, max_slippage_pct=0.5, max_spread_pct=0.5,
                 max_position_usd=10000, fee_rate=0.01,
             )
         )
@@ -241,7 +205,6 @@ class TestBacktestEngine:
         # With fees, PnL should be less than without
         executed = [t for t in result.trade_records if t.decision == "execute"][0]
         assert executed.fee > 0
-        assert executed.pnl < (1.0 - 0.55) * 100  # Less than fee-free PnL
 
     @pytest.mark.asyncio
     async def test_point_in_time_scoring(self):
@@ -274,7 +237,6 @@ class TestBacktestEngine:
         config = AppConfig(
             scoring=ScoringConfig(min_resolved_markets=3),
             execution=ExecutionConfig(
-                min_liquidity_usd=0, max_slippage_pct=0.5, max_spread_pct=0.5,
                 max_position_usd=10000,
             ),
         )

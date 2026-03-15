@@ -50,12 +50,12 @@ def config(api_config):
         api=api_config,
         scoring=ScoringConfig(min_resolved_markets=2),  # low threshold for tests
         execution=ExecutionConfig(
-            min_liquidity_usd=100.0,  # low threshold for tests
-            max_slippage_pct=0.05,
-            max_spread_pct=0.10,
             max_position_usd=500.0,
             stale_signal_timeout_s=300.0,
             fill_timeout_s=0.5,  # short timeout for tests
+            min_liquidity_usd=100.0,  # used by live executor
+            max_slippage_pct=0.05,
+            max_spread_pct=0.10,
         ),
         top_wallets=10,
     )

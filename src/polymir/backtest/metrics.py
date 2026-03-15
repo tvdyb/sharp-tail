@@ -19,18 +19,6 @@ class BacktestResult:
     top_n: int = 50
     fee_rate: float = 0.0
     config_label: str = ""
-    synthetic_book_count: int = 0
-    real_book_count: int = 0
-
-    # ── Orderbook tracking ──────────────────────────────────────
-
-    @property
-    def synthetic_book_fraction(self) -> float:
-        """Fraction of trades that used a synthetic orderbook."""
-        total = self.synthetic_book_count + self.real_book_count
-        if total == 0:
-            return 0.0
-        return self.synthetic_book_count / total
 
     # ── Derived counts ────────────────────────────────────────────
 
@@ -157,26 +145,6 @@ class BacktestResult:
                 max_dur = max(max_dur, current_dur)
         return max_dur
 
-    # ── Slippage stats ────────────────────────────────────────────
-
-    @property
-    def slippage_estimates(self) -> list[float]:
-        return [t.estimated_slippage for t in self.trade_records if t.decision == "execute"]
-
-    @property
-    def slippage_realized(self) -> list[float]:
-        return [t.realized_slippage for t in self.trade_records if t.decision == "execute"]
-
-    @property
-    def avg_estimated_slippage(self) -> float:
-        s = self.slippage_estimates
-        return mean(s) if s else 0.0
-
-    @property
-    def avg_realized_slippage(self) -> float:
-        s = self.slippage_realized
-        return mean(s) if s else 0.0
-
     # ── Time-based breakdowns ─────────────────────────────────────
 
     def monthly_returns(self) -> dict[str, float]:
@@ -250,8 +218,6 @@ class BacktestResult:
             f"Sortino ratio:   {self.sortino_ratio:.2f}",
             f"Max drawdown:    ${self.max_drawdown:,.2f}",
             f"Max DD duration: {self.max_drawdown_duration} trades",
-            f"Avg est slip:    {self.avg_estimated_slippage:.4f}",
-            f"Avg real slip:   {self.avg_realized_slippage:.4f}",
             f"Fee rate:        {self.fee_rate:.4f}",
         ]
         return "\n".join(lines)
@@ -274,8 +240,6 @@ class BacktestResult:
             "sortino_ratio": self.sortino_ratio,
             "max_drawdown": self.max_drawdown,
             "max_drawdown_duration": self.max_drawdown_duration,
-            "avg_estimated_slippage": self.avg_estimated_slippage,
-            "avg_realized_slippage": self.avg_realized_slippage,
             "monthly_returns": self.monthly_returns(),
             "pnl_by_category": self.pnl_by_category(),
         }

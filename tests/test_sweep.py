@@ -29,8 +29,7 @@ class TestSweep:
 
         config = AppConfig(
             execution=ExecutionConfig(
-                min_liquidity_usd=0, max_slippage_pct=0.5,
-                max_spread_pct=0.5, max_position_usd=10000,
+                max_position_usd=10000,
             ),
         )
         sweep_config = SweepConfig(
@@ -74,8 +73,7 @@ class TestSweep:
         config = AppConfig(
             scoring=ScoringConfig(min_resolved_markets=2),
             execution=ExecutionConfig(
-                min_liquidity_usd=0, max_slippage_pct=0.5,
-                max_spread_pct=0.5, max_position_usd=10000,
+                max_position_usd=10000,
             ),
         )
         sweep_config = SweepConfig(latencies=[30], top_ns=[5, 10])
@@ -97,7 +95,7 @@ class TestHeatmapData:
         results = {}
         for lat in [30, 60]:
             for top in [10, 20]:
-                label = f"lat={lat}_top={top}_fee=0.0_slip=0.02_pos=1000.0"
+                label = f"lat={lat}_top={top}_fee=0.0_pos=1000.0"
                 records = [
                     TradeRecord(
                         timestamp=now, wallet="w0", market_id="m0",

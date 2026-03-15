@@ -14,7 +14,6 @@ from polymir.backtest.bias_tests import (
     check_parameter_sensitivity,
     check_price_leakage,
     check_resolution_data_leakage,
-    check_slippage_sensitivity,
     check_time_window_stability,
     check_wallet_concentration,
     check_wallet_score_leakage,
@@ -68,8 +67,6 @@ def _make_executed_records(
             fill_price=0.56,
             size=100,
             pnl=base_pnl if i % 3 != 0 else -base_pnl * 0.5,
-            estimated_slippage=0.01,
-            realized_slippage=0.012,
             decision="execute",
             market_resolved_price=1.0 if i % 3 != 0 else 0.0,
             market_category=category,
@@ -236,16 +233,6 @@ class TestParameterSensitivity:
         # Sharpe should be negative for -5 base, positive for 10.
         # Actually 1 + 2 configs might be profitable. Let me just verify logic.
         assert out["total_configs"] == 10
-
-
-class TestSlippageSensitivity:
-    def test_robust_to_slippage(self):
-        results = {}
-        for slip in [0.0, 0.01, 0.02, 0.05]:
-            records = _make_executed_records(10, base_pnl=10 - slip * 100)
-            results[slip] = BacktestResult(trade_records=records)
-        out = check_slippage_sensitivity(results)
-        assert "sharpe_curve" in out
 
 
 class TestLatencySensitivity:

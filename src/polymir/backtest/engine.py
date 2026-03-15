@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta
 from typing import Any
 
 import structlog
 
-from polymir.backtest.data import HistoricalOrderbook, HistoricalTrade, TradeRecord
+from polymir.backtest.data import HistoricalTrade, TradeRecord
 from polymir.backtest.metrics import BacktestResult
 from polymir.config import AppConfig
-from polymir.models import OrderBook, OrderBookLevel
 from polymir.scanner import WalletMarketResult, compute_wallet_score
 
 logger = structlog.get_logger()
@@ -38,9 +36,9 @@ class BacktestEngine:
         self,
         trades: list[HistoricalTrade] | None = None,
         wallet_results: list[WalletMarketResult] | None = None,
-        orderbooks: list[HistoricalOrderbook] | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
+        **kwargs: Any,
     ) -> BacktestResult:
         """Run backtest with point-in-time wallet scoring.
 
@@ -49,7 +47,6 @@ class BacktestEngine:
             wallet_results: Per-wallet market results for scoring. If provided,
                 scores are computed point-in-time. If None, all trades are
                 treated as coming from qualified wallets.
-            orderbooks: Historical orderbook snapshots for slippage estimation.
             start_date: Start date filter (YYYY-MM-DD).
             end_date: End date filter (YYYY-MM-DD).
         """
@@ -64,8 +61,6 @@ class BacktestEngine:
         if end_date:
             end = datetime.fromisoformat(end_date)
             trades = [t for t in trades if t.timestamp <= end]
-
-        book_lookup = _build_book_lookup(orderbooks or [])
 
         # Pre-sort wallet results by resolution date for efficient PIT filtering
         sorted_wr = sorted(
@@ -92,8 +87,6 @@ class BacktestEngine:
         max_total_exposure = exec_cfg.max_position_usd * self._top_n
 
         for trade in trades:
-            exec_time = trade.timestamp + timedelta(seconds=self._latency_s)
-
             # Point-in-time wallet scoring
             if sorted_wr:
                 cutoff_idx = _bisect_resolved_before(sorted_wr, trade.timestamp)
@@ -146,52 +139,6 @@ class BacktestEngine:
                 ))
                 continue
 
-            book, is_synthetic = _get_book_at(
-                trade.asset_id, exec_time, book_lookup, trade,
-                spread=exec_cfg.synthetic_book_spread,
-                top_size=exec_cfg.synthetic_book_top_size,
-            )
-            if is_synthetic:
-                result.synthetic_book_count += 1
-            else:
-                result.real_book_count += 1
-
-            # Liquidity check
-            total_liq = book.total_liquidity()
-            if total_liq < exec_cfg.min_liquidity_usd:
-                result.trade_records.append(TradeRecord(
-                    timestamp=trade.timestamp,
-                    wallet=trade.wallet,
-                    market_id=trade.market_id,
-                    asset_id=trade.asset_id,
-                    side=trade.side,
-                    signal_price=trade.price,
-                    decision="liquidity",
-                    wallet_score=wallet_score,
-                    wallet_rank=wallet_rank,
-                    market_category=trade.market_category,
-                    market_resolved_price=trade.market_resolved_price,
-                ))
-                continue
-
-            # Spread check
-            spread_pct = book.spread_pct
-            if spread_pct is not None and spread_pct > exec_cfg.max_spread_pct:
-                result.trade_records.append(TradeRecord(
-                    timestamp=trade.timestamp,
-                    wallet=trade.wallet,
-                    market_id=trade.market_id,
-                    asset_id=trade.asset_id,
-                    side=trade.side,
-                    signal_price=trade.price,
-                    decision="spread",
-                    wallet_score=wallet_score,
-                    wallet_rank=wallet_rank,
-                    market_category=trade.market_category,
-                    market_resolved_price=trade.market_resolved_price,
-                ))
-                continue
-
             # Per-market position limit: don't double up
             if trade.market_id in open_positions:
                 result.trade_records.append(TradeRecord(
@@ -227,59 +174,27 @@ class BacktestEngine:
                 ))
                 continue
 
-            # Position sizing
-            max_contracts = exec_cfg.max_position_usd / (trade.price or 1.0)
+            # Simple slippage model: flat cost per trade from midpoint
+            slippage = exec_cfg.slippage_per_trade
+
+            # Fill price = signal price + slippage for BUY, - slippage for SELL
+            if trade.side == "BUY":
+                fill_price = min(trade.price + slippage, 0.99)
+            else:
+                fill_price = max(trade.price - slippage, 0.01)
+
+            # Position sizing (keep max_position_usd cap)
+            max_contracts = exec_cfg.max_position_usd / (fill_price or 1.0)
             order_size = min(trade.size, max_contracts)
 
-            # Slippage estimation
-            fill_price = book.estimate_fill_price(order_size, trade.side)
-            if fill_price is None:
-                result.trade_records.append(TradeRecord(
-                    timestamp=trade.timestamp,
-                    wallet=trade.wallet,
-                    market_id=trade.market_id,
-                    asset_id=trade.asset_id,
-                    side=trade.side,
-                    signal_price=trade.price,
-                    decision="no_fill",
-                    wallet_score=wallet_score,
-                    wallet_rank=wallet_rank,
-                    market_category=trade.market_category,
-                    market_resolved_price=trade.market_resolved_price,
-                ))
-                continue
-
-            midpoint = book.midpoint or trade.price
-            est_slippage = abs(fill_price - midpoint) / midpoint if midpoint > 0 else 0
-
-            if est_slippage > exec_cfg.max_slippage_pct:
-                result.trade_records.append(TradeRecord(
-                    timestamp=trade.timestamp,
-                    wallet=trade.wallet,
-                    market_id=trade.market_id,
-                    asset_id=trade.asset_id,
-                    side=trade.side,
-                    signal_price=trade.price,
-                    decision="slippage",
-                    estimated_slippage=est_slippage,
-                    wallet_score=wallet_score,
-                    wallet_rank=wallet_rank,
-                    market_category=trade.market_category,
-                    market_resolved_price=trade.market_resolved_price,
-                ))
-                continue
-
-            # Execute trade
+            # PnL
             pnl = (trade.market_resolved_price - fill_price) * order_size
             if trade.side == "SELL":
                 pnl = (fill_price - trade.market_resolved_price) * order_size
 
-            # Fees
+            # Fees (Polymarket has no fees, but configurable)
             fee = fill_price * order_size * exec_cfg.fee_rate
             pnl -= fee
-
-            # Sqrt-time impact model (more realistic than linear)
-            realized_slippage = est_slippage * math.sqrt(1.0 + self._latency_s / 60.0)
 
             # Track position
             position_usd = fill_price * order_size
@@ -296,8 +211,6 @@ class BacktestEngine:
                 fill_price=fill_price,
                 size=order_size,
                 pnl=pnl,
-                estimated_slippage=est_slippage,
-                realized_slippage=realized_slippage,
                 fee=fee,
                 decision="execute",
                 wallet_score=wallet_score,
@@ -364,64 +277,3 @@ def _compute_pit_scores(
     score_dict = {w: s for w, s in top}
     rank_list = [w for w, _ in top]
     return score_dict, rank_list
-
-
-def _build_book_lookup(
-    orderbooks: list[HistoricalOrderbook],
-) -> dict[str, list[HistoricalOrderbook]]:
-    """Group orderbook snapshots by asset_id, sorted by time."""
-    lookup: dict[str, list[HistoricalOrderbook]] = {}
-    for ob in orderbooks:
-        lookup.setdefault(ob.asset_id, []).append(ob)
-    for books in lookup.values():
-        books.sort(key=lambda b: b.timestamp)
-    return lookup
-
-
-def _get_book_at(
-    asset_id: str,
-    at_time: datetime,
-    lookup: dict[str, list[HistoricalOrderbook]],
-    trade: HistoricalTrade,
-    spread: float = 0.04,
-    top_size: float = 100.0,
-) -> tuple[OrderBook, bool]:
-    """Get closest orderbook snapshot at or before at_time.
-
-    Returns:
-        Tuple of (OrderBook, is_synthetic).
-    """
-    books = lookup.get(asset_id, [])
-    best = None
-    for b in books:
-        if b.timestamp <= at_time:
-            best = b
-        else:
-            break
-    if best:
-        return best.to_orderbook(), False
-    return _synthetic_book(trade, spread=spread, top_size=top_size), True
-
-
-def _synthetic_book(
-    trade: HistoricalTrade,
-    spread: float = 0.04,
-    top_size: float = 100.0,
-) -> OrderBook:
-    """Create a synthetic multi-level orderbook from a single trade price.
-
-    Uses two price levels with decaying depth to be more conservative
-    than the old single-level 500-contract book.
-    """
-    mid = trade.price
-    return OrderBook(
-        asset_id=trade.asset_id,
-        bids=[
-            OrderBookLevel(price=max(0.01, mid - spread / 2), size=top_size),
-            OrderBookLevel(price=max(0.01, mid - spread), size=top_size * 0.5),
-        ],
-        asks=[
-            OrderBookLevel(price=min(0.99, mid + spread / 2), size=top_size),
-            OrderBookLevel(price=min(0.99, mid + spread), size=top_size * 0.5),
-        ],
-    )

@@ -45,7 +45,7 @@ class Strategy(ABC):
         start: date,
         end: date,
         capital: float = 10_000.0,
-        fee_rate: float = 0.02,
+        fee_rate: float = 0.0,
         max_position_frac: float = 0.10,
         **params: Any,
     ) -> StrategyResult:
@@ -125,7 +125,7 @@ class Strategy(ABC):
 
                 # Calculate P&L
                 entry_price = signal.entry_price
-                spread_cost = 0.01  # assume 1c spread crossing
+                spread_cost = 0.03  # 3c slippage, consistent with mirror backtest
                 effective_entry = entry_price + spread_cost if signal.direction == "BUY" else entry_price - spread_cost
                 effective_entry = max(0.01, min(0.99, effective_entry))
 

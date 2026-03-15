@@ -239,57 +239,6 @@ def check_parameter_sensitivity(
 # ── Transaction Cost & Execution Reality ─────────────────────────────
 
 
-def check_slippage_sensitivity(
-    results_by_slippage: dict[float, BacktestResult],
-) -> dict[str, Any]:
-    """Check how performance degrades with increasing slippage."""
-    if not results_by_slippage:
-        return {"test": "slippage_sensitivity", "passed": True, "detail": "no results"}
-
-    curve = {
-        slip: r.sharpe_ratio
-        for slip, r in sorted(results_by_slippage.items())
-    }
-    pnl_curve = {
-        slip: r.total_pnl
-        for slip, r in sorted(results_by_slippage.items())
-    }
-
-    # Find breakeven slippage (where Sharpe goes negative)
-    breakeven = None
-    for slip, sharpe in sorted(curve.items()):
-        if sharpe <= 0:
-            breakeven = slip
-            break
-
-    return {
-        "test": "slippage_sensitivity",
-        "passed": breakeven is None or breakeven > 0.01,  # Edge survives 1% slippage
-        "sharpe_curve": curve,
-        "pnl_curve": pnl_curve,
-        "breakeven_slippage": breakeven,
-    }
-
-
-def check_capacity(
-    results_by_scale: dict[float, BacktestResult],
-) -> dict[str, Any]:
-    """Check how returns degrade as position sizes scale up."""
-    if not results_by_scale:
-        return {"test": "capacity", "passed": True, "detail": "no results"}
-
-    sharpe_curve = {
-        scale: r.sharpe_ratio
-        for scale, r in sorted(results_by_scale.items())
-    }
-
-    return {
-        "test": "capacity",
-        "passed": True,  # Informational
-        "sharpe_by_scale": sharpe_curve,
-    }
-
-
 def check_latency_sensitivity(
     results_by_latency: dict[int, BacktestResult],
 ) -> dict[str, Any]:

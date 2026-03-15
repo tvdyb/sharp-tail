@@ -197,8 +197,6 @@ def _save_chart_data(result: BacktestResult, output_dir: str) -> None:
         "cumulative_pnl": result.cumulative_pnl,
         "pnl_series": result.pnl_series,
         "monthly_returns": result.monthly_returns(),
-        "slippage_estimates": result.slippage_estimates,
-        "slippage_realized": result.slippage_realized,
         "executed_timestamps": [
             t.timestamp.isoformat()
             for t in result.trade_records

@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from polymir.models import OrderBook, OrderBookLevel
-
 
 @dataclass
 class HistoricalTrade:
@@ -25,23 +23,6 @@ class HistoricalTrade:
 
 
 @dataclass
-class HistoricalOrderbook:
-    """Snapshot of orderbook at a point in time."""
-
-    asset_id: str
-    timestamp: datetime
-    bids: list[tuple[float, float]]  # (price, size)
-    asks: list[tuple[float, float]]
-
-    def to_orderbook(self) -> OrderBook:
-        return OrderBook(
-            asset_id=self.asset_id,
-            bids=[OrderBookLevel(price=p, size=s) for p, s in self.bids],
-            asks=[OrderBookLevel(price=p, size=s) for p, s in self.asks],
-        )
-
-
-@dataclass
 class TradeRecord:
     """Detailed record of a single backtest trade decision."""
 
@@ -54,8 +35,6 @@ class TradeRecord:
     fill_price: float | None = None
     size: float = 0.0
     pnl: float = 0.0
-    estimated_slippage: float = 0.0
-    realized_slippage: float = 0.0
     fee: float = 0.0
     decision: str = "execute"
     wallet_score: float = 0.0

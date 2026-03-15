@@ -48,18 +48,18 @@ class ScoringConfig:
 class ExecutionConfig:
     """Mirror execution parameters."""
 
-    max_slippage_pct: float = 0.02
-    max_spread_pct: float = 0.03
-    min_liquidity_usd: float = 10_000.0
     stale_signal_timeout_s: float = 300.0
     fill_timeout_s: float = 60.0
     aggression: float = 0.0  # 0 = midpoint, positive = more aggressive
     max_position_usd: float = 1_000.0
     poll_interval_s: float = 5.0
-    fee_rate: float = 0.0  # trading fee as fraction (e.g. 0.002 = 0.2%)
+    fee_rate: float = 0.0  # Polymarket has no trading fees
     signal_sides: tuple[str, ...] = ("BUY",)  # sides to signal on; add "SELL" to include exits
-    synthetic_book_spread: float = 0.04  # default spread for synthetic orderbooks
-    synthetic_book_top_size: float = 100.0  # default top-level depth for synthetic orderbooks
+    slippage_per_trade: float = 0.03  # flat 3 cent slippage from mid per trade
+    # Live executor orderbook checks (not used in backtest)
+    max_slippage_pct: float = 0.02
+    max_spread_pct: float = 0.03
+    min_liquidity_usd: float = 10_000.0
 
 
 @dataclass(frozen=True)

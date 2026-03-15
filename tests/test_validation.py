@@ -163,8 +163,7 @@ class TestWalkForward:
         config = AppConfig(
             scoring=ScoringConfig(min_resolved_markets=2),
             execution=ExecutionConfig(
-                min_liquidity_usd=0, max_slippage_pct=0.5,
-                max_spread_pct=0.5, max_position_usd=10000,
+                max_position_usd=10000,
             ),
         )
         vr = await walk_forward(
@@ -216,8 +215,7 @@ class TestInOutSample:
         config = AppConfig(
             scoring=ScoringConfig(min_resolved_markets=2),
             execution=ExecutionConfig(
-                min_liquidity_usd=0, max_slippage_pct=0.5,
-                max_spread_pct=0.5, max_position_usd=10000,
+                max_position_usd=10000,
             ),
         )
         vr = await in_out_sample_split(
@@ -262,8 +260,7 @@ class TestRandomizedBaseline:
         config = AppConfig(
             scoring=ScoringConfig(min_resolved_markets=2),
             execution=ExecutionConfig(
-                min_liquidity_usd=0, max_slippage_pct=0.5,
-                max_spread_pct=0.5, max_position_usd=10000,
+                max_position_usd=10000,
             ),
         )
         vr = await randomized_baseline(

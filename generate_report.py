@@ -37,12 +37,11 @@ from polymir.backtest.bias_tests import (
     check_parameter_sensitivity,
     check_price_leakage,
     check_resolution_data_leakage,
-    check_slippage_sensitivity,
     check_time_window_stability,
     check_wallet_concentration,
     check_wallet_score_leakage,
 )
-from polymir.backtest.data import HistoricalOrderbook, TradeRecord
+from polymir.backtest.data import TradeRecord
 from polymir.backtest.sweep import SweepConfig, build_heatmap_data, run_sweep
 from polymir.backtest.validation import (
     bootstrap_confidence_intervals,
@@ -221,8 +220,8 @@ def _parse_gamma_market(m: dict) -> dict | None:
 def fetch_real_data(max_markets: int = 200, trades_per_market: int = 500):
     """Fetch real Polymarket data: resolved markets and their trades.
 
-    Returns the same tuple as the old generate_synthetic_data():
-        (trades, wallet_results, orderbooks, wallet_aliases)
+    Returns:
+        (trades, wallet_results, wallet_aliases)
     """
     # Check cache first
     if os.path.exists(CACHE_PATH):
@@ -278,7 +277,6 @@ def _cache_to_objects(cache: dict):
     trades: list[HistoricalTrade] = []
     wallet_market_positions: dict[str, dict[str, dict]] = {}  # wallet -> market_id -> position info
     wallet_aliases: dict[str, str] = {}
-    orderbooks: list[HistoricalOrderbook] = []
 
     all_market_trades = cache.get("trades", {})
 
@@ -401,31 +399,6 @@ def _cache_to_objects(cache: dict):
                     "resolution_date": res_date,
                 }
 
-        # Build a synthetic orderbook snapshot based on real trade prices
-        if raw_trades:
-            prices = []
-            for t in raw_trades:
-                try:
-                    p = float(t.get("price", 0))
-                    if 0 < p < 1:
-                        prices.append(p)
-                except (ValueError, TypeError):
-                    pass
-            if prices:
-                avg_price = sum(prices) / len(prices)
-                spread = 0.02
-                # Use the first token's ID for the orderbook
-                asset_for_ob = raw_trades[0].get("asset", cid)
-                ob_ts = res_date - timedelta(days=5)
-                total_size = sum(float(t.get("size", 0)) for t in raw_trades if float(t.get("size", 0)) > 0)
-                depth = max(200, total_size / 10)
-                orderbooks.append(HistoricalOrderbook(
-                    asset_id=asset_for_ob,
-                    timestamp=ob_ts,
-                    bids=[(max(0.01, avg_price - spread / 2), depth)],
-                    asks=[(min(0.99, avg_price + spread / 2), depth)],
-                ))
-
     # Convert wallet positions to WalletMarketResult list
     wallet_results: list[WalletMarketResult] = []
     for wallet, positions in wallet_market_positions.items():
@@ -442,9 +415,9 @@ def _cache_to_objects(cache: dict):
             ))
 
     print(f"  Processed: {len(trades)} trades, {len(wallet_results)} wallet results, "
-          f"{len(orderbooks)} orderbooks, {len(wallet_aliases)} wallet aliases")
+          f"{len(wallet_aliases)} wallet aliases")
 
-    return trades, wallet_results, orderbooks, wallet_aliases
+    return trades, wallet_results, wallet_aliases
 
 
 # ── Chart generation ─────────────────────────────────────────────────
@@ -1413,18 +1386,14 @@ def build_pdf(
 
 async def main():
     print("Fetching real Polymarket data...")
-    trades, wallet_results, orderbooks, wallet_aliases = fetch_real_data(max_markets=200)
-    print(f"  {len(trades)} trades, {len(wallet_results)} wallet results, {len(orderbooks)} orderbooks")
+    trades, wallet_results, wallet_aliases = fetch_real_data(max_markets=200)
+    print(f"  {len(trades)} trades, {len(wallet_results)} wallet results")
 
     config = AppConfig(
         scoring=ScoringConfig(min_resolved_markets=5),
         execution=ExecutionConfig(
-            max_slippage_pct=0.05,
-            max_spread_pct=0.10,
-            min_liquidity_usd=0,
             max_position_usd=5000,
             stale_signal_timeout_s=600,
-            fee_rate=0.0,  # Polymarket has zero trading fees
         ),
         top_wallets=20,
     )
@@ -1449,7 +1418,6 @@ async def main():
     result = await engine.run(
         trades=trades,
         wallet_results=wallet_results,
-        orderbooks=orderbooks,
     )
     print(result.summary())
     print()
@@ -1489,7 +1457,6 @@ async def main():
         wallet_results=wallet_results,
         config=config,
         sweep_config=sweep_config,
-        orderbooks=orderbooks,
     )
     bias_results.append(check_parameter_sensitivity(sweep_results))
 
@@ -1498,28 +1465,8 @@ async def main():
     latency_results = {}
     for lat in [30, 60, 120, 300, 600]:
         e = BacktestEngine(config, latency_s=lat, top_n=20)
-        latency_results[lat] = await e.run(trades=trades, wallet_results=wallet_results, orderbooks=orderbooks)
+        latency_results[lat] = await e.run(trades=trades, wallet_results=wallet_results)
     bias_results.append(check_latency_sensitivity(latency_results))
-
-    # Slippage sensitivity
-    print("  Slippage sensitivity...")
-    slip_results = {}
-    for slip in [0.0, 0.01, 0.02, 0.05, 0.10]:
-        slip_cfg = AppConfig(
-            scoring=config.scoring,
-            execution=ExecutionConfig(
-                max_slippage_pct=slip if slip > 0 else 0.5,
-                max_spread_pct=0.10,
-                min_liquidity_usd=0,
-                max_position_usd=5000,
-                stale_signal_timeout_s=600,
-                fee_rate=0.0,
-            ),
-            top_wallets=20,
-        )
-        e = BacktestEngine(slip_cfg, latency_s=60, top_n=20)
-        slip_results[slip] = await e.run(trades=trades, wallet_results=wallet_results, orderbooks=orderbooks)
-    bias_results.append(check_slippage_sensitivity(slip_results))
 
     # Fee breakeven
     print("  Fee breakeven...")
@@ -1531,9 +1478,6 @@ async def main():
         fee_cfg = AppConfig(
             scoring=config.scoring,
             execution=ExecutionConfig(
-                max_slippage_pct=0.05,
-                max_spread_pct=0.10,
-                min_liquidity_usd=0,
                 max_position_usd=5000,
                 stale_signal_timeout_s=600,
                 fee_rate=fee,
@@ -1541,7 +1485,7 @@ async def main():
             top_wallets=20,
         )
         e = BacktestEngine(fee_cfg, latency_s=60, top_n=20)
-        fee_results[fee] = await e.run(trades=trades, wallet_results=wallet_results, orderbooks=orderbooks)
+        fee_results[fee] = await e.run(trades=trades, wallet_results=wallet_results)
     bias_results.append(check_fee_breakeven(fee_results))
 
     for br in bias_results:

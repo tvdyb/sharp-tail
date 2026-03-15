@@ -1,4 +1,4 @@
-"""Tests for bug fixes: fees, Kelly, synthetic book, Sharpe, monitor sides."""
+"""Tests for bug fixes and execution model."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from polymir.backtest import BacktestEngine, BacktestResult, HistoricalTrade
-from polymir.backtest.data import HistoricalOrderbook, TradeRecord
+from polymir.backtest.data import TradeRecord
 from polymir.backtest.metrics import BacktestResult
 from polymir.config import AppConfig, ExecutionConfig, ScoringConfig
 from polymir.models import OrderBook, OrderBookLevel, Trade, TradeSignal, WalletScore
@@ -159,10 +159,7 @@ class TestKellyFormula:
         buy_result = buy_strategy.backtest(date(2024, 2, 1), date(2024, 4, 1), fee_rate=0.0)
         sell_result = sell_strategy.backtest(date(2024, 2, 1), date(2024, 4, 1), fee_rate=0.0)
 
-        # At entry_price=0.5, BUY kelly = edge/0.5, SELL kelly = edge/0.5
-        # So with symmetric prices, sizes should be equal
-        # But with asymmetric prices, they'd differ
-        # Just verify both produce trades
+        # Both produce trades
         assert buy_result.trade_count >= 0
         assert sell_result.trade_count >= 0
 
@@ -171,98 +168,81 @@ class TestKellyFormula:
         market_yes = _make_research_market("m1", outcome="Yes")
         prices = _make_prices("m1", days=60, base=0.3)
 
-        # BUY at 0.3: edge = 0.7 - 0.3 = 0.4, kelly = 0.4/0.7 = 0.571
         buy_strategy = _DummyStrategy(
             [market_yes], prices,
             direction="BUY", confidence=0.7, entry_price=0.3,
         )
         buy_result = buy_strategy.backtest(date(2024, 2, 1), date(2024, 4, 1), fee_rate=0.0)
 
-        # For SELL at 0.3 on a "Yes" market: edge = 0.3 - confidence
-        # need confidence < entry_price for SELL edge to be positive
         market_no = _make_research_market("m2", outcome="No")
         prices2 = _make_prices("m2", days=60, base=0.7)
 
-        # SELL at 0.7: edge = 0.7 - 0.3 = 0.4, kelly = 0.4/0.7 = 0.571
         sell_strategy = _DummyStrategy(
             [market_no], prices2,
             direction="SELL", confidence=0.3, entry_price=0.7,
         )
         sell_result = sell_strategy.backtest(date(2024, 2, 1), date(2024, 4, 1), fee_rate=0.0)
 
-        # Both should generate trades with different sizes due to kelly formula
         if buy_result.trade_count > 0 and sell_result.trade_count > 0:
             buy_size = buy_result.trades[0].size_usd
             sell_size = sell_result.trades[0].size_usd
-            # The Kelly fractions differ because the denominators differ
-            # BUY: 0.4 / 0.7 = 0.571, SELL: 0.4 / 0.7 = 0.571
-            # In this symmetric case they're equal, which is correct
 
 
-# ── Bug Fix 3: Synthetic orderbook more conservative ─────────────────
+# ── Flat slippage model tests ─────────────────────────────────────────
 
 
-class TestSyntheticBook:
+class TestFlatSlippage:
     @pytest.mark.asyncio
-    async def test_synthetic_book_limits_size(self):
-        """With top_size=100, orders larger than ~100 should see slippage or no fill."""
+    async def test_buy_fill_price(self):
+        """BUY fill price = signal price + slippage_per_trade."""
         now = datetime(2024, 6, 1)
         trades = [
             HistoricalTrade(
                 wallet="w0", market_id="m0", asset_id="a0",
-                side="BUY", size=200, price=0.50,  # larger than top_size=100
+                side="BUY", size=50, price=0.50,
                 timestamp=now - timedelta(hours=1),
                 market_resolved_price=1.0,
             ),
         ]
         config = AppConfig(
             execution=ExecutionConfig(
-                max_slippage_pct=0.5,
-                max_spread_pct=0.5,
-                min_liquidity_usd=0,
-                max_position_usd=50000,
-                fee_rate=0.0,
-                synthetic_book_spread=0.04,
-                synthetic_book_top_size=100,
+                max_position_usd=5000,
+                slippage_per_trade=0.03,
             ),
         )
         engine = BacktestEngine(config, latency_s=0, top_n=10)
         result = await engine.run(trades=trades)
-        # Trade should execute but with limited size (can't fill full 200 from 100+50 depth)
         executed = [t for t in result.trade_records if t.decision == "execute"]
-        if executed:
-            # Size should be capped by orderbook depth, not the full 200
-            assert executed[0].size <= 200
+        assert len(executed) == 1
+        assert executed[0].fill_price == pytest.approx(0.53)  # 0.50 + 0.03
 
     @pytest.mark.asyncio
-    async def test_synthetic_book_fraction_tracked(self):
-        """BacktestResult should track what fraction of trades used synthetic books."""
+    async def test_sell_fill_price(self):
+        """SELL fill price = signal price - slippage_per_trade."""
         now = datetime(2024, 6, 1)
         trades = [
             HistoricalTrade(
                 wallet="w0", market_id="m0", asset_id="a0",
-                side="BUY", size=50, price=0.50,
+                side="SELL", size=50, price=0.50,
                 timestamp=now - timedelta(hours=1),
-                market_resolved_price=1.0,
+                market_resolved_price=0.0,
             ),
         ]
         config = AppConfig(
             execution=ExecutionConfig(
-                max_slippage_pct=0.5, max_spread_pct=0.5,
-                min_liquidity_usd=0, max_position_usd=5000,
-                fee_rate=0.0,
+                max_position_usd=5000,
+                slippage_per_trade=0.03,
             ),
         )
         engine = BacktestEngine(config, latency_s=0, top_n=10)
         result = await engine.run(trades=trades)
-        # No real orderbooks provided, so all should be synthetic
-        assert result.synthetic_book_count >= 1
-        assert result.real_book_count == 0
-        assert result.synthetic_book_fraction == 1.0
+        executed = [t for t in result.trade_records if t.decision == "execute"]
+        assert len(executed) == 1
+        assert executed[0].fill_price == pytest.approx(0.47)  # 0.50 - 0.03
 
     @pytest.mark.asyncio
-    async def test_real_book_tracked(self):
-        """When real orderbooks are provided, real_book_count should increment."""
+    async def test_zero_fees(self):
+        """Default fee_rate=0.0 means no fees in PnL."""
         now = datetime(2024, 6, 1)
         trades = [
             HistoricalTrade(
@@ -272,25 +252,19 @@ class TestSyntheticBook:
                 market_resolved_price=1.0,
             ),
         ]
-        orderbooks = [
-            HistoricalOrderbook(
-                asset_id="a0",
-                timestamp=now - timedelta(hours=2),
-                bids=[(0.49, 500)],
-                asks=[(0.51, 500)],
-            ),
-        ]
         config = AppConfig(
             execution=ExecutionConfig(
-                max_slippage_pct=0.5, max_spread_pct=0.5,
-                min_liquidity_usd=0, max_position_usd=5000,
-                fee_rate=0.0,
+                max_position_usd=5000,
+                slippage_per_trade=0.03,
             ),
         )
         engine = BacktestEngine(config, latency_s=0, top_n=10)
-        result = await engine.run(trades=trades, orderbooks=orderbooks)
-        assert result.real_book_count >= 1
-        assert result.synthetic_book_fraction < 1.0
+        result = await engine.run(trades=trades)
+        executed = [t for t in result.trade_records if t.decision == "execute"]
+        assert len(executed) == 1
+        assert executed[0].fee == 0.0
+        # PnL = (1.0 - 0.53) * 50 = 23.5
+        assert executed[0].pnl == pytest.approx((1.0 - 0.53) * 50)
 
 
 # ── Bug Fix 4: Sharpe annualization by trade frequency ───────────────
@@ -484,9 +458,7 @@ class TestPositionTracker:
         ]
         config = AppConfig(
             execution=ExecutionConfig(
-                max_slippage_pct=0.5, max_spread_pct=0.5,
-                min_liquidity_usd=0, max_position_usd=5000,
-                fee_rate=0.0,
+                max_position_usd=5000,
             ),
         )
         engine = BacktestEngine(config, latency_s=0, top_n=10)
@@ -495,41 +467,3 @@ class TestPositionTracker:
         duplicates = [t for t in result.trade_records if t.decision == "duplicate_market"]
         assert len(executed) == 1
         assert len(duplicates) == 1
-
-
-# ── Improvement 8: Sqrt-time slippage model ──────────────────────────
-
-
-class TestSlippageModel:
-    @pytest.mark.asyncio
-    async def test_sqrt_time_slippage(self):
-        """Realized slippage should use sqrt-time model, not linear."""
-        now = datetime(2024, 6, 1)
-        trades = [
-            HistoricalTrade(
-                wallet="w0", market_id="m0", asset_id="a0",
-                side="BUY", size=50, price=0.50,
-                timestamp=now,
-                market_resolved_price=1.0,
-            ),
-        ]
-        config = AppConfig(
-            execution=ExecutionConfig(
-                max_slippage_pct=0.5, max_spread_pct=0.5,
-                min_liquidity_usd=0, max_position_usd=5000,
-                fee_rate=0.0,
-            ),
-        )
-
-        # Run with 60s latency
-        engine = BacktestEngine(config, latency_s=60, top_n=10)
-        result = await engine.run(trades=trades)
-        executed = [t for t in result.trade_records if t.decision == "execute"]
-        if executed:
-            est = executed[0].estimated_slippage
-            real = executed[0].realized_slippage
-            # sqrt(1 + 60/60) = sqrt(2) ≈ 1.414
-            expected_ratio = math.sqrt(2.0)
-            if est > 0:
-                actual_ratio = real / est
-                assert actual_ratio == pytest.approx(expected_ratio, rel=0.01)

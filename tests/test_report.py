@@ -26,8 +26,6 @@ def _make_result() -> BacktestResult:
             fill_price=0.56,
             size=100,
             pnl=10.0 if i % 3 != 0 else -5.0,
-            estimated_slippage=0.01,
-            realized_slippage=0.012,
             decision="execute",
             market_resolved_price=1.0 if i % 3 != 0 else 0.0,
             market_category="politics" if i % 2 == 0 else "sports",
@@ -38,7 +36,7 @@ def _make_result() -> BacktestResult:
             timestamp=now - timedelta(hours=i),
             wallet="w0", market_id=f"skip{i}", asset_id=f"as{i}",
             side="BUY", signal_price=0.55,
-            decision="slippage",
+            decision="stale",
         )
         for i in range(5)
     ]

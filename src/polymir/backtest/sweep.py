@@ -9,7 +9,7 @@ from typing import Any
 
 import structlog
 
-from polymir.backtest.data import HistoricalOrderbook, HistoricalTrade
+from polymir.backtest.data import HistoricalTrade
 from polymir.backtest.engine import BacktestEngine
 from polymir.backtest.metrics import BacktestResult
 from polymir.config import AppConfig, ExecutionConfig
@@ -25,7 +25,6 @@ class SweepConfig:
     latencies: list[int] = None  # type: ignore[assignment]
     top_ns: list[int] = None  # type: ignore[assignment]
     fee_rates: list[float] = None  # type: ignore[assignment]
-    max_slippages: list[float] = None  # type: ignore[assignment]
     max_position_usds: list[float] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -35,8 +34,6 @@ class SweepConfig:
             self.top_ns = [10, 20, 50, 100]
         if self.fee_rates is None:
             self.fee_rates = [0.0]
-        if self.max_slippages is None:
-            self.max_slippages = [0.02]
         if self.max_position_usds is None:
             self.max_position_usds = [1000.0]
 
@@ -46,7 +43,6 @@ async def run_sweep(
     wallet_results: list[WalletMarketResult],
     config: AppConfig,
     sweep_config: SweepConfig | None = None,
-    orderbooks: list[HistoricalOrderbook] | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> dict[str, BacktestResult]:
@@ -62,7 +58,6 @@ async def run_sweep(
         len(sweep_config.latencies)
         * len(sweep_config.top_ns)
         * len(sweep_config.fee_rates)
-        * len(sweep_config.max_slippages)
         * len(sweep_config.max_position_usds)
     )
     done = 0
@@ -70,45 +65,41 @@ async def run_sweep(
     for latency in sweep_config.latencies:
         for top_n in sweep_config.top_ns:
             for fee_rate in sweep_config.fee_rates:
-                for max_slip in sweep_config.max_slippages:
-                    for max_pos in sweep_config.max_position_usds:
-                        label = f"lat={latency}_top={top_n}_fee={fee_rate}_slip={max_slip}_pos={max_pos}"
+                for max_pos in sweep_config.max_position_usds:
+                    label = f"lat={latency}_top={top_n}_fee={fee_rate}_pos={max_pos}"
 
-                        # Build config variant
-                        exec_cfg = ExecutionConfig(
-                            max_slippage_pct=max_slip,
-                            max_spread_pct=config.execution.max_spread_pct,
-                            min_liquidity_usd=config.execution.min_liquidity_usd,
-                            stale_signal_timeout_s=config.execution.stale_signal_timeout_s,
-                            fill_timeout_s=config.execution.fill_timeout_s,
-                            aggression=config.execution.aggression,
-                            max_position_usd=max_pos,
-                            poll_interval_s=config.execution.poll_interval_s,
-                            fee_rate=fee_rate,
-                        )
-                        variant = AppConfig(
-                            api=config.api,
-                            scoring=config.scoring,
-                            execution=exec_cfg,
-                            db_path=config.db_path,
-                            top_wallets=top_n,
-                            log_level=config.log_level,
-                        )
+                    # Build config variant
+                    exec_cfg = ExecutionConfig(
+                        stale_signal_timeout_s=config.execution.stale_signal_timeout_s,
+                        fill_timeout_s=config.execution.fill_timeout_s,
+                        aggression=config.execution.aggression,
+                        max_position_usd=max_pos,
+                        poll_interval_s=config.execution.poll_interval_s,
+                        fee_rate=fee_rate,
+                        slippage_per_trade=config.execution.slippage_per_trade,
+                    )
+                    variant = AppConfig(
+                        api=config.api,
+                        scoring=config.scoring,
+                        execution=exec_cfg,
+                        db_path=config.db_path,
+                        top_wallets=top_n,
+                        log_level=config.log_level,
+                    )
 
-                        engine = BacktestEngine(variant, latency_s=latency, top_n=top_n)
-                        result = await engine.run(
-                            trades=trades,
-                            wallet_results=wallet_results,
-                            orderbooks=orderbooks,
-                            start_date=start_date,
-                            end_date=end_date,
-                        )
-                        result.config_label = label
-                        results[label] = result
+                    engine = BacktestEngine(variant, latency_s=latency, top_n=top_n)
+                    result = await engine.run(
+                        trades=trades,
+                        wallet_results=wallet_results,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                    result.config_label = label
+                    results[label] = result
 
-                        done += 1
-                        if done % 10 == 0 or done == total:
-                            logger.info("sweep_progress", done=done, total=total)
+                    done += 1
+                    if done % 10 == 0 or done == total:
+                        logger.info("sweep_progress", done=done, total=total)
 
     return results
 
