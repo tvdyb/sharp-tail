@@ -19,6 +19,18 @@ class BacktestResult:
     top_n: int = 50
     fee_rate: float = 0.0
     config_label: str = ""
+    synthetic_book_count: int = 0
+    real_book_count: int = 0
+
+    # ── Orderbook tracking ──────────────────────────────────────
+
+    @property
+    def synthetic_book_fraction(self) -> float:
+        """Fraction of trades that used a synthetic orderbook."""
+        total = self.synthetic_book_count + self.real_book_count
+        if total == 0:
+            return 0.0
+        return self.synthetic_book_count / total
 
     # ── Derived counts ────────────────────────────────────────────
 
@@ -83,7 +95,7 @@ class BacktestResult:
 
     @property
     def sharpe_ratio(self) -> float:
-        """Annualized Sharpe ratio (risk-free rate = 0 for prediction markets)."""
+        """Annualized Sharpe ratio based on actual trade frequency."""
         pnl = self.pnl_series
         if len(pnl) < 2:
             return 0.0
@@ -91,7 +103,14 @@ class BacktestResult:
         sd = stdev(pnl)
         if sd == 0:
             return 0.0
-        return (avg / sd) * math.sqrt(252)
+        # Estimate trades per year from actual timestamps
+        executed = [t for t in self.trade_records if t.decision == "execute"]
+        if len(executed) >= 2:
+            span = (executed[-1].timestamp - executed[0].timestamp).total_seconds()
+            if span > 0:
+                trades_per_year = len(executed) / (span / (365.25 * 86400))
+                return (avg / sd) * math.sqrt(trades_per_year)
+        return (avg / sd) * math.sqrt(252)  # fallback
 
     @property
     def sortino_ratio(self) -> float:

@@ -144,7 +144,13 @@ class DataCollector:
                 try:
                     data = await self._get(
                         f"{gamma_url}/markets",
-                        params={"limit": page_size, "offset": offset},
+                        params={
+                            "limit": page_size,
+                            "offset": offset,
+                            "order": "volume",
+                            "ascending": "false",
+                            "closed": "true" if status == "resolved" else "false",
+                        },
                     )
                 except Exception as e:
                     logger.error("fetch_markets_error", status=status, offset=offset, error=str(e))

@@ -477,3 +477,96 @@ class TestEndToEndPipeline:
         # Verify slippage stats
         stats = await db.get_slippage_stats()
         assert stats["trade_count"] == 1
+
+
+class TestResearchPipelineIntegration:
+    """End-to-end test: runs all 7 strategies on synthetic data."""
+
+    def test_full_research_pipeline_synthetic(self, tmp_path):
+        """Create synthetic markets + prices, run all 7 strategies, validate, generate report."""
+        from datetime import date, datetime, timedelta
+
+        from polymir.research.models import (
+            MarketCategory,
+            PriceSnapshot,
+            ResearchMarket,
+        )
+        from polymir.research.pipeline import run_research, run_validation, generate_full_report
+
+        import random
+        rng = random.Random(42)
+
+        # Create 20 synthetic resolved markets
+        markets = []
+        prices = []
+        start_dt = datetime(2024, 1, 1)
+
+        categories = [MarketCategory.POLITICS, MarketCategory.SPORTS, MarketCategory.CRYPTO,
+                       MarketCategory.ECONOMICS, MarketCategory.WEATHER]
+
+        for i in range(20):
+            mid = f"market_{i}"
+            outcome = "Yes" if rng.random() > 0.4 else "No"
+            cat = categories[i % len(categories)]
+            creation = start_dt + timedelta(days=i * 5)
+            resolution = creation + timedelta(days=60 + rng.randint(0, 30))
+
+            markets.append(ResearchMarket(
+                market_id=mid,
+                condition_id=mid,
+                question=f"Will event {i} happen?",
+                slug=mid,
+                category=cat,
+                creation_date=creation,
+                end_date=resolution,
+                resolution_date=resolution,
+                outcome=outcome,
+                total_volume=rng.uniform(10000, 500000),
+                liquidity=rng.uniform(5000, 50000),
+                token_ids=[f"{mid}_yes", f"{mid}_no"],
+                neg_risk=i < 5,  # first 5 markets are neg-risk (for multi-outcome arb)
+                event_id=f"event_{i // 3}",  # group some markets by event
+                status="resolved",
+                total_lifetime_days=60.0,
+            ))
+
+            # Generate 120 days of price data per market
+            base_price = 0.3 + rng.random() * 0.4
+            drift = 0.002 if outcome == "Yes" else -0.002
+            price = base_price
+            for d in range(120):
+                ts = creation + timedelta(days=d)
+                price = max(0.05, min(0.95, price + drift + rng.gauss(0, 0.01)))
+                prices.append(PriceSnapshot(
+                    market_id=mid,
+                    token_id=f"{mid}_yes",
+                    timestamp=ts,
+                    price=price,
+                    volume_bucket=rng.uniform(100, 5000),
+                ))
+
+        # Run all 7 strategies
+        start = date(2024, 1, 15)
+        end = date(2024, 8, 1)
+        results = run_research(markets, prices, start=start, end=end)
+
+        assert len(results) == 7, f"Expected 7 strategies, got {len(results)}"
+        for name, result in results.items():
+            assert result.strategy_name == name
+            # Not all strategies will produce trades, but the result should exist
+            assert result is not None
+
+        # Run validation on strategies that produced trades
+        validations = run_validation(markets, prices, results, start=start, end=end)
+        # Some strategies may not have enough trades for validation, that's OK
+        assert isinstance(validations, dict)
+
+        # Generate report
+        report = generate_full_report(
+            markets, prices, results, validations,
+            output_dir=str(tmp_path),
+        )
+        assert "Alpha Research Report" in report
+        # Check report file exists
+        import os
+        assert os.path.exists(tmp_path / "research_report.md")

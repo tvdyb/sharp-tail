@@ -57,6 +57,9 @@ class ExecutionConfig:
     max_position_usd: float = 1_000.0
     poll_interval_s: float = 5.0
     fee_rate: float = 0.0  # trading fee as fraction (e.g. 0.002 = 0.2%)
+    signal_sides: tuple[str, ...] = ("BUY",)  # sides to signal on; add "SELL" to include exits
+    synthetic_book_spread: float = 0.04  # default spread for synthetic orderbooks
+    synthetic_book_top_size: float = 100.0  # default top-level depth for synthetic orderbooks
 
 
 @dataclass(frozen=True)

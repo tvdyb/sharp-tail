@@ -96,8 +96,15 @@ class ResearchEngine:
         train_months: int = 6,
         test_months: int = 2,
         best_params: dict[str, Any] | None = None,
+        param_grid: dict[str, list[Any]] | None = None,
+        optimize_per_window: bool = False,
     ) -> list[StrategyResult]:
-        """Walk-forward out-of-sample testing."""
+        """Walk-forward out-of-sample testing.
+
+        Args:
+            optimize_per_window: If True and param_grid is provided, re-optimize
+                parameters on each training window before testing OOS.
+        """
         oos_results = []
         current = start
 
@@ -111,7 +118,19 @@ class ResearchEngine:
             actual_test_end = min(test_end, end)
 
             try:
-                params = best_params or {}
+                if optimize_per_window and param_grid:
+                    # Re-optimize on training window
+                    sweep_results = self.parameter_sweep(
+                        strategy_class, current, train_end, param_grid,
+                    )
+                    if sweep_results:
+                        best = max(sweep_results, key=lambda r: r.sharpe_ratio)
+                        params = best.params
+                    else:
+                        params = best_params or {}
+                else:
+                    params = best_params or {}
+
                 strategy = strategy_class(
                     markets=self._markets,
                     prices=self._prices,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -85,6 +86,11 @@ class BacktestEngine:
         )
         exec_cfg = self._config.execution
 
+        # Position tracker: market_id -> total exposure (USD)
+        open_positions: dict[str, float] = {}
+        total_exposure = 0.0
+        max_total_exposure = exec_cfg.max_position_usd * self._top_n
+
         for trade in trades:
             exec_time = trade.timestamp + timedelta(seconds=self._latency_s)
 
@@ -140,7 +146,15 @@ class BacktestEngine:
                 ))
                 continue
 
-            book = _get_book_at(trade.asset_id, exec_time, book_lookup, trade)
+            book, is_synthetic = _get_book_at(
+                trade.asset_id, exec_time, book_lookup, trade,
+                spread=exec_cfg.synthetic_book_spread,
+                top_size=exec_cfg.synthetic_book_top_size,
+            )
+            if is_synthetic:
+                result.synthetic_book_count += 1
+            else:
+                result.real_book_count += 1
 
             # Liquidity check
             total_liq = book.total_liquidity()
@@ -171,6 +185,41 @@ class BacktestEngine:
                     side=trade.side,
                     signal_price=trade.price,
                     decision="spread",
+                    wallet_score=wallet_score,
+                    wallet_rank=wallet_rank,
+                    market_category=trade.market_category,
+                    market_resolved_price=trade.market_resolved_price,
+                ))
+                continue
+
+            # Per-market position limit: don't double up
+            if trade.market_id in open_positions:
+                result.trade_records.append(TradeRecord(
+                    timestamp=trade.timestamp,
+                    wallet=trade.wallet,
+                    market_id=trade.market_id,
+                    asset_id=trade.asset_id,
+                    side=trade.side,
+                    signal_price=trade.price,
+                    decision="duplicate_market",
+                    wallet_score=wallet_score,
+                    wallet_rank=wallet_rank,
+                    market_category=trade.market_category,
+                    market_resolved_price=trade.market_resolved_price,
+                ))
+                continue
+
+            # Total exposure check
+            trade_exposure = min(trade.size * trade.price, exec_cfg.max_position_usd)
+            if total_exposure + trade_exposure > max_total_exposure:
+                result.trade_records.append(TradeRecord(
+                    timestamp=trade.timestamp,
+                    wallet=trade.wallet,
+                    market_id=trade.market_id,
+                    asset_id=trade.asset_id,
+                    side=trade.side,
+                    signal_price=trade.price,
+                    decision="exposure_limit",
                     wallet_score=wallet_score,
                     wallet_rank=wallet_rank,
                     market_category=trade.market_category,
@@ -229,8 +278,13 @@ class BacktestEngine:
             fee = fill_price * order_size * exec_cfg.fee_rate
             pnl -= fee
 
-            # Realized slippage model: linear impact proportional to latency
-            realized_slippage = est_slippage * (1.0 + self._latency_s / 600.0)
+            # Sqrt-time impact model (more realistic than linear)
+            realized_slippage = est_slippage * math.sqrt(1.0 + self._latency_s / 60.0)
+
+            # Track position
+            position_usd = fill_price * order_size
+            open_positions[trade.market_id] = position_usd
+            total_exposure += position_usd
 
             result.trade_records.append(TradeRecord(
                 timestamp=trade.timestamp,
@@ -329,8 +383,14 @@ def _get_book_at(
     at_time: datetime,
     lookup: dict[str, list[HistoricalOrderbook]],
     trade: HistoricalTrade,
-) -> OrderBook:
-    """Get closest orderbook snapshot at or before at_time."""
+    spread: float = 0.04,
+    top_size: float = 100.0,
+) -> tuple[OrderBook, bool]:
+    """Get closest orderbook snapshot at or before at_time.
+
+    Returns:
+        Tuple of (OrderBook, is_synthetic).
+    """
     books = lookup.get(asset_id, [])
     best = None
     for b in books:
@@ -339,15 +399,29 @@ def _get_book_at(
         else:
             break
     if best:
-        return best.to_orderbook()
-    return _synthetic_book(trade)
+        return best.to_orderbook(), False
+    return _synthetic_book(trade, spread=spread, top_size=top_size), True
 
 
-def _synthetic_book(trade: HistoricalTrade) -> OrderBook:
-    """Create a synthetic orderbook from a single trade price."""
-    spread = 0.02
+def _synthetic_book(
+    trade: HistoricalTrade,
+    spread: float = 0.04,
+    top_size: float = 100.0,
+) -> OrderBook:
+    """Create a synthetic multi-level orderbook from a single trade price.
+
+    Uses two price levels with decaying depth to be more conservative
+    than the old single-level 500-contract book.
+    """
+    mid = trade.price
     return OrderBook(
         asset_id=trade.asset_id,
-        bids=[OrderBookLevel(price=trade.price - spread / 2, size=500)],
-        asks=[OrderBookLevel(price=trade.price + spread / 2, size=500)],
+        bids=[
+            OrderBookLevel(price=max(0.01, mid - spread / 2), size=top_size),
+            OrderBookLevel(price=max(0.01, mid - spread), size=top_size * 0.5),
+        ],
+        asks=[
+            OrderBookLevel(price=min(0.99, mid + spread / 2), size=top_size),
+            OrderBookLevel(price=min(0.99, mid + spread), size=top_size * 0.5),
+        ],
     )

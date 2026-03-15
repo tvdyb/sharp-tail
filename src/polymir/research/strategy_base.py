@@ -77,6 +77,9 @@ class Strategy(ABC):
         # Sample at daily frequency for signal generation
         daily_timestamps = self._sample_daily(all_timestamps)
 
+        # Track traded markets to prevent duplicate entries
+        traded_markets: set[str] = set()
+
         for as_of in daily_timestamps:
             signals = self.generate_signals(as_of)
 
@@ -89,6 +92,10 @@ class Strategy(ABC):
                 if market.status != "resolved" or not market.outcome:
                     continue
 
+                # Skip if we already have a position in this market
+                if signal.market_id in traded_markets:
+                    continue
+
                 # Quarter-Kelly sizing
                 if signal.confidence <= 0:
                     continue
@@ -98,7 +105,10 @@ class Strategy(ABC):
                 odds = (1.0 - signal.entry_price) / signal.entry_price if signal.entry_price > 0 else 0
                 if odds <= 0:
                     continue
-                kelly = edge / (1.0 - signal.entry_price) if signal.entry_price < 1 else 0
+                if signal.direction == "BUY":
+                    kelly = edge / (1.0 - signal.entry_price) if signal.entry_price < 1 else 0
+                else:
+                    kelly = edge / signal.entry_price if signal.entry_price > 0 else 0
                 quarter_kelly = kelly * 0.25
                 position_frac = min(quarter_kelly * signal.size_fraction, max_position_frac)
                 size_usd = capital * position_frac
@@ -125,7 +135,7 @@ class Strategy(ABC):
                 else:
                     gross_pnl = (effective_entry - exit_price) * contracts
 
-                fees = abs(gross_pnl) * fee_rate if gross_pnl > 0 else 0.0
+                fees = effective_entry * contracts * fee_rate
                 net_pnl = gross_pnl - fees
 
                 holding_hours = 0.0
@@ -146,6 +156,7 @@ class Strategy(ABC):
                     slippage=spread_cost,
                 )
                 result.trades.append(trade)
+                traded_markets.add(signal.market_id)
 
         result.trades.sort(key=lambda t: t.entry_time)
         logger.info(

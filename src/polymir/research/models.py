@@ -154,7 +154,14 @@ class StrategyResult:
         sd = stdev(pnl)
         if sd == 0:
             return 0.0
-        return (avg / sd) * math.sqrt(252)
+        # Estimate trades per year from actual entry timestamps
+        if len(self.trades) >= 2:
+            sorted_trades = sorted(self.trades, key=lambda t: t.entry_time)
+            span = (sorted_trades[-1].entry_time - sorted_trades[0].entry_time).total_seconds()
+            if span > 0:
+                trades_per_year = len(self.trades) / (span / (365.25 * 86400))
+                return (avg / sd) * math.sqrt(trades_per_year)
+        return (avg / sd) * math.sqrt(252)  # fallback
 
     @property
     def sortino_ratio(self) -> float:

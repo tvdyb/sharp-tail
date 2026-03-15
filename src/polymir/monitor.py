@@ -103,8 +103,8 @@ class TradeMonitor:
         """Convert a trade to a signal if it's a new position entry from a watched wallet."""
         if trade.owner not in self._watched_wallets:
             return None
-        # Only signal on BUY trades (new position entries)
-        if trade.side != "BUY":
+        # Filter by configured signal sides (default: BUY only)
+        if trade.side not in self._config.execution.signal_sides:
             return None
 
         return TradeSignal(
