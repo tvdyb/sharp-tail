@@ -35,13 +35,18 @@ class APIConfig:
 class ScoringConfig:
     """Wallet scoring parameters.
 
-    Rating = lower bound of CI on per-market Sharpe ratio (held positions only).
-    Long track records tighten the CI, naturally boosting the rating.
+    Two scoring paths:
+    1. Sharpe path: wallets with sufficient ROI variance are ranked by Sharpe
+       point estimate, gated by CI lower bound > 0 (must be statistically
+       significant at the configured confidence level).
+    2. Consistency path: wallets with near-zero ROI variance but high win rate
+       and enough markets are scored via win_rate * log(n_held).
     """
 
-    min_resolved_markets: int = 20
+    min_resolved_markets: int = 10
     min_hold_ratio: float = 0.70  # wallets must hold ≥70% of positions to expiration
-    ci_confidence: float = 0.95  # confidence level for Sharpe CI (0.95 → z=1.96)
+    ci_confidence: float = 0.90  # confidence level for Sharpe CI (0.90 → z=1.645)
+    min_roi_stdev: float = 0.001  # below this, use consistency path instead of Sharpe
 
 
 @dataclass(frozen=True)

@@ -155,10 +155,14 @@ class OrderBook(BaseModel):
 class WalletScore(BaseModel):
     """Computed score for a wallet.
 
-    The rating (composite_score) is the lower bound of the 95% CI on the
-    wallet's per-market Sharpe ratio, computed only on held-to-expiration
-    positions.  This naturally rewards both high risk-adjusted returns AND
-    long track records (more markets → tighter CI → higher floor).
+    Dual-path scoring on held-to-expiration positions:
+
+    1. **Sharpe path** (ROI stdev >= min_roi_stdev): composite_score is the
+       Sharpe point estimate.  The CI lower bound must be > 0 for the wallet
+       to qualify (significance gate), but ranking uses the point estimate so
+       a sharp wallet with fewer markets isn't penalised by CI width.
+    2. **Consistency path** (ROI stdev < min_roi_stdev, win_rate >= 85%):
+       composite_score = win_rate * log(n_held).  Sharpe fields are 0.0.
     """
 
     address: str
@@ -169,7 +173,7 @@ class WalletScore(BaseModel):
     sharpe_ci_upper: float = 0.0
     hold_ratio: float = 0.0
     resolved_market_count: int = 0
-    composite_score: float = 0.0  # = sharpe_ci_lower
+    composite_score: float = 0.0
     scored_at: datetime = Field(default_factory=datetime.utcnow)
 
 

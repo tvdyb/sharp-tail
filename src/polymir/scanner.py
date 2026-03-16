@@ -169,12 +169,16 @@ def compute_wallet_score(
     config: ScoringConfig,
     as_of: datetime | None = None,
 ) -> WalletScore | None:
-    """Compute wallet rating from the lower CI bound of per-market Sharpe.
+    """Compute wallet rating via dual-path scoring.
 
-    The rating naturally rewards:
-    - High risk-adjusted returns (high Sharpe)
-    - Long track records (more markets → tighter CI → higher floor)
-    - Holding to expiration (hard filter + scored on held positions only)
+    **Sharpe path** (ROI stdev >= min_roi_stdev):
+        composite_score = Sharpe point estimate, gated by CI lower bound > 0.
+        Wallets are ranked by actual Sharpe, not CI width.
+
+    **Consistency path** (ROI stdev < min_roi_stdev):
+        For wallets with near-zero variance (e.g. buying at $0.999) that still
+        have high win rates and enough markets:
+        composite_score = win_rate * log(n_held).
 
     Args:
         wallet: Wallet address.
@@ -206,34 +210,56 @@ def compute_wallet_score(
     rois = [r.roi for r in held_results]
     avg_roi = mean(rois)
 
-    # Sharpe ratio = mean(roi) / stdev(roi), capped to avoid numerical blow-up
     sd = stdev(rois)
-    if sd < 0.01:
-        # Near-zero variance means all positions have ~identical ROI
-        # (e.g. buying at $0.999).  Not a meaningful signal — skip.
-        return None
-    sharpe = max(min(avg_roi / sd, 10.0), -10.0)
 
-    # Sharpe CI: SE(sharpe) ≈ sqrt((1 + sharpe²/2) / n)
-    n = len(rois)
-    se = math.sqrt((1.0 + sharpe ** 2 / 2.0) / n)
+    if sd >= config.min_roi_stdev:
+        # ── Sharpe path ──────────────────────────────────────────────
+        sharpe = max(min(avg_roi / sd, 10.0), -10.0)
 
-    # z-score for desired confidence level
-    z = _z_score(config.ci_confidence)
-    ci_lower = sharpe - z * se
-    ci_upper = sharpe + z * se
+        n = len(rois)
+        se = math.sqrt((1.0 + sharpe ** 2 / 2.0) / n)
 
-    return WalletScore(
-        address=wallet,
-        win_rate=win_rate,
-        avg_roi=avg_roi,
-        sharpe_ratio=sharpe,
-        sharpe_ci_lower=ci_lower,
-        sharpe_ci_upper=ci_upper,
-        hold_ratio=hold_ratio,
-        resolved_market_count=len(results),
-        composite_score=ci_lower,
-    )
+        z = _z_score(config.ci_confidence)
+        ci_lower = sharpe - z * se
+        ci_upper = sharpe + z * se
+
+        # Significance gate: CI lower bound must be positive
+        if ci_lower <= 0:
+            return None
+
+        return WalletScore(
+            address=wallet,
+            win_rate=win_rate,
+            avg_roi=avg_roi,
+            sharpe_ratio=sharpe,
+            sharpe_ci_lower=ci_lower,
+            sharpe_ci_upper=ci_upper,
+            hold_ratio=hold_ratio,
+            resolved_market_count=len(results),
+            composite_score=sharpe,
+        )
+    else:
+        # ── Consistency path ─────────────────────────────────────────
+        # Near-zero variance — Sharpe is undefined.  Score by win rate
+        # scaled by log(sample size) if the wallet is highly consistent.
+        if len(held_results) < config.min_resolved_markets:
+            return None
+        if win_rate < 0.85:
+            return None
+
+        consistency_score = win_rate * math.log(len(held_results))
+
+        return WalletScore(
+            address=wallet,
+            win_rate=win_rate,
+            avg_roi=avg_roi,
+            sharpe_ratio=0.0,
+            sharpe_ci_lower=0.0,
+            sharpe_ci_upper=0.0,
+            hold_ratio=hold_ratio,
+            resolved_market_count=len(results),
+            composite_score=consistency_score,
+        )
 
 
 def _z_score(confidence: float) -> float:
