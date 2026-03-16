@@ -78,27 +78,42 @@ _CATEGORY_MAP = {
 }
 
 
-def _api_get(url: str, retries: int = 3) -> dict | list | None:
-    """Fetch JSON from a URL with retries and rate limiting."""
+def _api_get(url: str, retries: int = 5) -> dict | list | None:
+    """Fetch JSON from a URL with retries and exponential backoff."""
     for attempt in range(retries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "polymir-backtest/1.0"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode())
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, http.client.IncompleteRead) as e:
-            if attempt < retries - 1:
-                time.sleep(1 * (attempt + 1))
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < retries - 1:
+                wait = min(2 ** (attempt + 1), 30)
+                time.sleep(wait)
+            elif attempt < retries - 1:
+                time.sleep(2 ** attempt)
             else:
-                print(f"  WARNING: Failed to fetch {url}: {e}")
+                print(f"  WARNING: Failed to fetch {url[:80]}...: {e}")
+                return None
+        except (urllib.error.URLError, TimeoutError, http.client.IncompleteRead, http.client.RemoteDisconnected, ConnectionError, OSError) as e:
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                print(f"  WARNING: Failed to fetch {url[:80]}...: {e}")
                 return None
 
 
-def _fetch_resolved_markets(limit: int = 200) -> list[dict]:
-    """Fetch high-volume resolved markets from the Gamma API."""
+def _fetch_resolved_markets(limit: int | None = None) -> list[dict]:
+    """Fetch high-volume resolved markets from the Gamma API.
+
+    Args:
+        limit: Maximum number of markets to fetch.  None means fetch all.
+    """
     markets = []
     offset = 0
     batch = 100
-    while len(markets) < limit:
+    while True:
+        if limit is not None and len(markets) >= limit:
+            break
         url = (
             f"https://gamma-api.polymarket.com/markets?"
             f"closed=true&limit={batch}&offset={offset}"
@@ -108,11 +123,12 @@ def _fetch_resolved_markets(limit: int = 200) -> list[dict]:
         if not data or not isinstance(data, list):
             break
         markets.extend(data)
+        print(f"  Fetched {len(markets)} markets so far...")
         if len(data) < batch:
             break
         offset += batch
         time.sleep(0.3)
-    return markets[:limit]
+    return markets[:limit] if limit is not None else markets
 
 
 def _fetch_trades_for_market(condition_id: str, limit: int = 500) -> list[dict]:
@@ -218,8 +234,17 @@ def _parse_gamma_market(m: dict) -> dict | None:
     }
 
 
-def fetch_real_data(max_markets: int = 200, trades_per_market: int = 500):
+def fetch_real_data(
+    max_markets: int | None = None,
+    trades_per_market: int = 500,
+    min_volume: float = 1_000.0,
+):
     """Fetch real Polymarket data: resolved markets and their trades.
+
+    Args:
+        max_markets: Maximum markets to fetch.  None (default) means all.
+        trades_per_market: Max trades to fetch per market.
+        min_volume: Minimum market volume in USD to include.
 
     Returns:
         (trades, wallet_results, wallet_aliases)
@@ -238,21 +263,24 @@ def fetch_real_data(max_markets: int = 200, trades_per_market: int = 500):
     parsed_markets = []
     for m in raw_markets:
         parsed = _parse_gamma_market(m)
-        if parsed:
+        if parsed and parsed.get("volume", 0) >= min_volume:
             parsed_markets.append(parsed)
 
-    print(f"  {len(parsed_markets)} markets have valid resolution data")
+    print(f"  {len(parsed_markets)} markets with volume >= ${min_volume:,.0f}")
 
     # Fetch trades for each market
     all_market_trades: dict[str, list[dict]] = {}
+    failed = 0
     for i, pm in enumerate(parsed_markets):
-        if i % 20 == 0:
-            print(f"  Fetching trades: {i}/{len(parsed_markets)} markets...")
+        if i % 50 == 0:
+            print(f"  Fetching trades: {i}/{len(parsed_markets)} markets... ({failed} failed)")
         cid = pm["condition_id"]
         raw_trades = _fetch_trades_for_market(cid, limit=trades_per_market)
         if raw_trades:
             all_market_trades[cid] = raw_trades
-        time.sleep(0.15)  # Rate limit
+        else:
+            failed += 1
+        time.sleep(0.5)  # Rate limit — 2 req/s to avoid throttling
 
     print(f"  Got trades for {len(all_market_trades)} markets")
 
@@ -1395,11 +1423,11 @@ def build_pdf(
 
 async def main():
     print("Fetching real Polymarket data...")
-    trades, wallet_results, wallet_aliases = fetch_real_data(max_markets=200)
+    trades, wallet_results, wallet_aliases = fetch_real_data()
     print(f"  {len(trades)} trades, {len(wallet_results)} wallet results")
 
     config = AppConfig(
-        scoring=ScoringConfig(min_resolved_markets=5),
+        scoring=ScoringConfig(),  # uses defaults: min_resolved=10, ci=0.90
         execution=ExecutionConfig(
             max_position_usd=5000,
             stale_signal_timeout_s=600,
