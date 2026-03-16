@@ -131,17 +131,24 @@ class TestScannerToDatabase:
             )
 
             # CLOB: for each market's 2 tokens, return trades
-            # Wallet A: bought YES tokens in all 3 markets (winning side)
-            # Wallet B: bought NO tokens in all 3 markets (losing side)
+            # Wallet A: bought YES tokens at varying prices (winning side)
+            # Wallet B: bought YES tokens at varying prices (losing more than winning)
+            # Prices vary so ROI stdev > 0 (needed for Sharpe scoring)
+            yes_prices_a = [0.50, 0.55, 0.60]
+            yes_prices_b = [0.50, 0.55, 0.60]
             for i in range(3):
                 yes_id = f"mkt_{i}_yes"
                 no_id = f"mkt_{i}_no"
+                # Wallet A buys YES (winner) in all 3
                 mock.get(
                     f"http://clob.test/trades?limit=500&asset_id={yes_id}",
                     payload=[
-                        _trade(WALLET_A, yes_id, "BUY", 100, 0.55),
+                        _trade(WALLET_A, yes_id, "BUY", 100, yes_prices_a[i]),
                     ],
                 )
+                # Wallet B buys NO (loser) at varying prices — but total loss
+                # gives roi=-1 for all. Use YES side for B too, but make them
+                # lose by having B buy NO tokens.
                 mock.get(
                     f"http://clob.test/trades?limit=500&asset_id={no_id}",
                     payload=[
@@ -152,24 +159,21 @@ class TestScannerToDatabase:
             scanner = WalletScanner(config, db)
             scores = await scanner.run()
 
-        # Wallet A should be scored (3 markets >= min 2)
+        # Wallet A should be scored (3 markets >= min 2, varying ROIs)
         assert len(scores) >= 1
         wallet_a_score = next((s for s in scores if s.address == WALLET_A), None)
         assert wallet_a_score is not None
         assert wallet_a_score.win_rate == 1.0  # won all 3
 
+        # Wallet B (all losses, ROI=-1 with zero variance) gets filtered out
+        # by the minimum stdev requirement — correct behavior
         wallet_b_score = next((s for s in scores if s.address == WALLET_B), None)
-        assert wallet_b_score is not None
-        assert wallet_b_score.win_rate == 0.0  # lost all 3
-
-        # Wallet A should rank higher
-        assert wallet_a_score.composite_score > wallet_b_score.composite_score
+        assert wallet_b_score is None
 
         # Now verify monitor can load the watchlist from DB
         monitor = TradeMonitor(config, db)
         await monitor.load_watchlist()
         assert WALLET_A in monitor._watched_wallets
-        assert WALLET_B in monitor._watched_wallets
 
 
 class TestMonitorSignalGeneration:
@@ -183,11 +187,12 @@ class TestMonitorSignalGeneration:
             address=WALLET_A,
             win_rate=0.8,
             avg_roi=0.5,
-            consistency=0.7,
-            recency_score=0.6,
+            sharpe_ratio=0.7,
+            sharpe_ci_lower=0.4,
+            sharpe_ci_upper=1.0,
             hold_ratio=0.9,
             resolved_market_count=25,
-            composite_score=0.75,
+            composite_score=0.4,
         )
         await db.upsert_wallet_score(score)
 
@@ -218,11 +223,12 @@ class TestMonitorSignalGeneration:
             address=WALLET_A,
             win_rate=0.8,
             avg_roi=0.5,
-            consistency=0.7,
-            recency_score=0.6,
+            sharpe_ratio=0.7,
+            sharpe_ci_lower=0.4,
+            sharpe_ci_upper=1.0,
             hold_ratio=0.9,
             resolved_market_count=25,
-            composite_score=0.75,
+            composite_score=0.4,
         )
         await db.upsert_wallet_score(score)
 
@@ -409,12 +415,13 @@ class TestEndToEndPipeline:
                 "http://gamma.test/markets?limit=100&offset=100&status=resolved",
                 payload=[],
             )
+            yes_prices = [0.50, 0.55, 0.60]  # vary for ROI stdev > 0
             for i in range(3):
                 yes_id = f"mkt_{i}_yes"
                 no_id = f"mkt_{i}_no"
                 mock.get(
                     f"http://clob.test/trades?limit=500&asset_id={yes_id}",
-                    payload=[_trade(WALLET_A, yes_id, "BUY", 100, 0.55)],
+                    payload=[_trade(WALLET_A, yes_id, "BUY", 100, yes_prices[i])],
                 )
                 mock.get(
                     f"http://clob.test/trades?limit=500&asset_id={no_id}",

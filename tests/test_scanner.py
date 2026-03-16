@@ -1,4 +1,4 @@
-"""Tests for wallet scoring model."""
+"""Tests for wallet scoring model (Sharpe CI lower-bound rating)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from polymir.config import ScoringConfig
-from polymir.scanner import WalletMarketResult, compute_wallet_score, _normalize_roi
+from polymir.scanner import WalletMarketResult, compute_wallet_score, _z_score
 
 
 def _make_results(
@@ -43,13 +43,18 @@ def _make_results(
 class TestComputeWalletScore:
     def test_basic_scoring(self):
         results = _make_results()
-        config = ScoringConfig()
+        config = ScoringConfig(min_resolved_markets=20)
         score = compute_wallet_score("0xabc", results, config)
         assert score is not None
         assert score.address == "0xabc"
-        assert 0 < score.composite_score < 1
-        assert score.win_rate == pytest.approx(0.6)
+        # Win rate computed on held positions only: 15 wins out of 20 held = 0.75
+        assert score.win_rate == pytest.approx(0.75)
         assert score.resolved_market_count == 25
+        # Sharpe CI fields populated
+        assert score.sharpe_ratio != 0.0
+        assert score.sharpe_ci_lower < score.sharpe_ratio < score.sharpe_ci_upper
+        # composite_score == sharpe_ci_lower
+        assert score.composite_score == pytest.approx(score.sharpe_ci_lower)
 
     def test_below_min_markets_returns_none(self):
         results = _make_results(count=5)
@@ -57,61 +62,77 @@ class TestComputeWalletScore:
         score = compute_wallet_score("0xabc", results, config)
         assert score is None
 
+    def test_below_min_hold_ratio_returns_none(self):
+        """Wallets that exit early too often should be filtered out."""
+        results = _make_results(count=25, hold_fraction=0.3)
+        config = ScoringConfig(min_resolved_markets=20, min_hold_ratio=0.70)
+        score = compute_wallet_score("0xabc", results, config)
+        assert score is None
+
     def test_perfect_wallet(self):
-        results = _make_results(
-            count=30, win_fraction=1.0, roi_base=0.20, hold_fraction=1.0
-        )
-        config = ScoringConfig()
+        """All wins with varying ROIs → high Sharpe and positive rating."""
+        now = datetime.utcnow()
+        results = [
+            WalletMarketResult(
+                wallet="0xabc", market_id=f"m{i}", won=True,
+                roi=0.15 + 0.01 * i,  # slight variance so stdev > 0
+                held_to_expiration=True, total_bought=100, total_sold=20,
+                resolution_date=now - timedelta(days=i),
+            )
+            for i in range(30)
+        ]
+        config = ScoringConfig(min_resolved_markets=20)
         score = compute_wallet_score("0xabc", results, config)
         assert score is not None
         assert score.win_rate == 1.0
         assert score.hold_ratio == 1.0
-        assert score.composite_score > 0.7
-
-    def test_terrible_wallet(self):
-        results = _make_results(
-            count=25, win_fraction=0.1, roi_base=0.05, hold_fraction=0.3
-        )
-        config = ScoringConfig()
-        score = compute_wallet_score("0xabc", results, config)
-        assert score is not None
-        assert score.win_rate == pytest.approx(0.1, abs=0.05)
-        assert score.composite_score < 0.5
+        assert score.sharpe_ratio > 0
+        assert score.composite_score > 0  # CI lower bound should be positive
 
     def test_high_win_rate_beats_low(self):
-        config = ScoringConfig()
+        config = ScoringConfig(min_resolved_markets=20)
         high_wr = compute_wallet_score(
-            "high", _make_results(win_fraction=0.9), config
+            "high", _make_results(win_fraction=0.8, hold_fraction=1.0), config
         )
         low_wr = compute_wallet_score(
-            "low", _make_results(win_fraction=0.2), config
+            "low", _make_results(win_fraction=0.3, hold_fraction=1.0), config
         )
         assert high_wr is not None and low_wr is not None
+        assert high_wr.sharpe_ratio > low_wr.sharpe_ratio
         assert high_wr.composite_score > low_wr.composite_score
 
-    def test_recency_weighting(self):
-        """Recent results should be weighted more heavily."""
-        config = ScoringConfig()
-        recent = _make_results(days_ago_start=30)
-        old = _make_results(days_ago_start=365)
-        score_recent = compute_wallet_score("recent", recent, config)
-        score_old = compute_wallet_score("old", old, config)
-        assert score_recent is not None and score_old is not None
-        assert score_recent.recency_score > score_old.recency_score
+    def test_longer_track_record_tightens_ci(self):
+        """More markets → narrower CI → higher lower bound (same Sharpe)."""
+        config = ScoringConfig(min_resolved_markets=20)
+        # Same win rate / ROI distribution but different sample sizes
+        short = compute_wallet_score(
+            "short", _make_results(count=25, win_fraction=0.7), config
+        )
+        long = compute_wallet_score(
+            "long", _make_results(count=100, win_fraction=0.7), config
+        )
+        assert short is not None and long is not None
+        # CI should be tighter with more data
+        short_width = short.sharpe_ci_upper - short.sharpe_ci_lower
+        long_width = long.sharpe_ci_upper - long.sharpe_ci_lower
+        assert long_width < short_width
+        # With positive Sharpe and tighter CI, lower bound should be higher
+        assert long.composite_score > short.composite_score
 
-    def test_consistency_scoring(self):
-        """Consistent returns should score higher than volatile."""
-        config = ScoringConfig()
-        # Consistent: all same ROI
+    def test_consistent_beats_volatile(self):
+        """Consistent returns → higher Sharpe → higher rating."""
+        config = ScoringConfig(min_resolved_markets=20)
+        # Consistent: moderate spread of positive ROIs (stdev ~0.03)
         consistent = [
             WalletMarketResult(
-                wallet="c", market_id=f"m{i}", won=True, roi=0.10,
+                wallet="c", market_id=f"m{i}", won=True,
+                roi=0.10 + 0.02 * (i % 5 - 2),  # 0.06 to 0.14
                 held_to_expiration=True, total_bought=100, total_sold=0,
                 resolution_date=datetime.utcnow() - timedelta(days=i),
             )
             for i in range(25)
         ]
-        # Volatile: alternating high/low ROI
+        # Volatile: same mean but high variance
         volatile = [
             WalletMarketResult(
                 wallet="v", market_id=f"m{i}", won=True,
@@ -124,19 +145,45 @@ class TestComputeWalletScore:
         sc = compute_wallet_score("c", consistent, config)
         sv = compute_wallet_score("v", volatile, config)
         assert sc is not None and sv is not None
-        assert sc.consistency > sv.consistency
+        assert sc.sharpe_ratio > sv.sharpe_ratio
+        assert sc.composite_score > sv.composite_score
+
+    def test_hold_ratio_filter(self):
+        """Wallets below min_hold_ratio are filtered out."""
+        now = datetime.utcnow()
+        config = ScoringConfig(min_resolved_markets=20, min_hold_ratio=0.5)
+
+        def _make_held_results(hold_frac: float) -> list[WalletMarketResult]:
+            results = []
+            count = 25
+            held_count = int(count * hold_frac)
+            for i in range(count):
+                held = i < held_count
+                won = (i % 10) < 7
+                results.append(WalletMarketResult(
+                    wallet="w", market_id=f"m{i}", won=won,
+                    roi=0.10 if won else -0.05,
+                    held_to_expiration=held,
+                    total_bought=100, total_sold=20 if held else 100,
+                    resolution_date=now - timedelta(days=180 - i * 7),
+                ))
+            return results
+
+        high_hold = compute_wallet_score("holder", _make_held_results(1.0), config)
+        low_hold = compute_wallet_score("flipper", _make_held_results(0.6), config)
+        assert high_hold is not None and low_hold is not None
+        assert high_hold.hold_ratio > low_hold.hold_ratio
 
 
-class TestNormalizeRoi:
-    def test_zero(self):
-        assert _normalize_roi(0) == pytest.approx(0.5)
+class TestZScore:
+    def test_95_confidence(self):
+        z = _z_score(0.95)
+        assert z == pytest.approx(1.96, abs=0.01)
 
-    def test_positive(self):
-        assert _normalize_roi(1.0) > 0.5
+    def test_99_confidence(self):
+        z = _z_score(0.99)
+        assert z == pytest.approx(2.576, abs=0.01)
 
-    def test_negative(self):
-        assert _normalize_roi(-1.0) < 0.5
-
-    def test_bounded(self):
-        assert 0 < _normalize_roi(100) <= 1.0
-        assert 0 <= _normalize_roi(-100) < 1.0
+    def test_90_confidence(self):
+        z = _z_score(0.90)
+        assert z == pytest.approx(1.645, abs=0.01)

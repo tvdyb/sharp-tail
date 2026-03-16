@@ -33,15 +33,15 @@ class APIConfig:
 
 @dataclass(frozen=True)
 class ScoringConfig:
-    """Wallet scoring parameters."""
+    """Wallet scoring parameters.
+
+    Rating = lower bound of CI on per-market Sharpe ratio (held positions only).
+    Long track records tighten the CI, naturally boosting the rating.
+    """
 
     min_resolved_markets: int = 20
-    recency_half_life_days: float = 90.0
-    win_rate_weight: float = 0.30
-    roi_weight: float = 0.25
-    consistency_weight: float = 0.20
-    recency_weight: float = 0.15
-    hold_ratio_weight: float = 0.10
+    min_hold_ratio: float = 0.70  # wallets must hold ≥70% of positions to expiration
+    ci_confidence: float = 0.95  # confidence level for Sharpe CI (0.95 → z=1.96)
 
 
 @dataclass(frozen=True)

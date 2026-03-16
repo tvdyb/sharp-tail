@@ -368,9 +368,9 @@ class TestMonitorSignalSides:
             # Add a watched wallet
             score = WalletScore(
                 address="0xtest",
-                win_rate=0.8, avg_roi=0.5, consistency=0.7,
-                recency_score=0.6, hold_ratio=0.9,
-                resolved_market_count=25, composite_score=0.75,
+                win_rate=0.8, avg_roi=0.5, sharpe_ratio=0.7,
+                sharpe_ci_lower=0.4, sharpe_ci_upper=1.0, hold_ratio=0.9,
+                resolved_market_count=25, composite_score=0.4,
             )
             await db.upsert_wallet_score(score)
 
@@ -397,9 +397,9 @@ class TestMonitorSignalSides:
         async with Database(":memory:") as db:
             score = WalletScore(
                 address="0xtest",
-                win_rate=0.8, avg_roi=0.5, consistency=0.7,
-                recency_score=0.6, hold_ratio=0.9,
-                resolved_market_count=25, composite_score=0.75,
+                win_rate=0.8, avg_roi=0.5, sharpe_ratio=0.7,
+                sharpe_ci_lower=0.4, sharpe_ci_upper=1.0, hold_ratio=0.9,
+                resolved_market_count=25, composite_score=0.4,
             )
             await db.upsert_wallet_score(score)
 

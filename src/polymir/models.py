@@ -153,16 +153,23 @@ class OrderBook(BaseModel):
 
 
 class WalletScore(BaseModel):
-    """Computed score for a wallet."""
+    """Computed score for a wallet.
+
+    The rating (composite_score) is the lower bound of the 95% CI on the
+    wallet's per-market Sharpe ratio, computed only on held-to-expiration
+    positions.  This naturally rewards both high risk-adjusted returns AND
+    long track records (more markets → tighter CI → higher floor).
+    """
 
     address: str
     win_rate: float = 0.0
     avg_roi: float = 0.0
-    consistency: float = 0.0
-    recency_score: float = 0.0
+    sharpe_ratio: float = 0.0
+    sharpe_ci_lower: float = 0.0
+    sharpe_ci_upper: float = 0.0
     hold_ratio: float = 0.0
     resolved_market_count: int = 0
-    composite_score: float = 0.0
+    composite_score: float = 0.0  # = sharpe_ci_lower
     scored_at: datetime = Field(default_factory=datetime.utcnow)
 
 

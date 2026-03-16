@@ -63,7 +63,7 @@ class TestSweep:
         wallet_results = [
             WalletMarketResult(
                 wallet="w0", market_id=f"wr{i}",
-                won=True, roi=0.1,
+                won=True, roi=0.08 + 0.01 * i,  # vary ROIs for Sharpe scoring
                 held_to_expiration=True, total_bought=100, total_sold=0,
                 resolution_date=now - timedelta(days=30 + i),
             )

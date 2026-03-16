@@ -24,8 +24,9 @@ CREATE TABLE IF NOT EXISTS wallet_scores (
     address TEXT NOT NULL,
     win_rate REAL NOT NULL,
     avg_roi REAL NOT NULL,
-    consistency REAL NOT NULL,
-    recency_score REAL NOT NULL,
+    sharpe_ratio REAL NOT NULL,
+    sharpe_ci_lower REAL NOT NULL,
+    sharpe_ci_upper REAL NOT NULL,
     hold_ratio REAL NOT NULL,
     resolved_market_count INTEGER NOT NULL,
     composite_score REAL NOT NULL,
@@ -121,15 +122,17 @@ class Database:
         conn = self._ensure_conn()
         await conn.execute(
             """INSERT OR REPLACE INTO wallet_scores
-               (address, win_rate, avg_roi, consistency, recency_score,
-                hold_ratio, resolved_market_count, composite_score, scored_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (address, win_rate, avg_roi, sharpe_ratio, sharpe_ci_lower,
+                sharpe_ci_upper, hold_ratio, resolved_market_count,
+                composite_score, scored_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 score.address,
                 score.win_rate,
                 score.avg_roi,
-                score.consistency,
-                score.recency_score,
+                score.sharpe_ratio,
+                score.sharpe_ci_lower,
+                score.sharpe_ci_upper,
                 score.hold_ratio,
                 score.resolved_market_count,
                 score.composite_score,
@@ -141,8 +144,9 @@ class Database:
     async def get_top_wallets(self, limit: int = 50) -> list[WalletScore]:
         conn = self._ensure_conn()
         cursor = await conn.execute(
-            """SELECT DISTINCT address, win_rate, avg_roi, consistency, recency_score,
-                      hold_ratio, resolved_market_count, composite_score, scored_at
+            """SELECT DISTINCT address, win_rate, avg_roi, sharpe_ratio,
+                      sharpe_ci_lower, sharpe_ci_upper, hold_ratio,
+                      resolved_market_count, composite_score, scored_at
                FROM wallet_scores
                WHERE scored_at = (SELECT MAX(scored_at) FROM wallet_scores ws2 WHERE ws2.address = wallet_scores.address)
                ORDER BY composite_score DESC
@@ -155,8 +159,9 @@ class Database:
                 address=r["address"],
                 win_rate=r["win_rate"],
                 avg_roi=r["avg_roi"],
-                consistency=r["consistency"],
-                recency_score=r["recency_score"],
+                sharpe_ratio=r["sharpe_ratio"],
+                sharpe_ci_lower=r["sharpe_ci_lower"],
+                sharpe_ci_upper=r["sharpe_ci_upper"],
                 hold_ratio=r["hold_ratio"],
                 resolved_market_count=r["resolved_market_count"],
                 composite_score=r["composite_score"],
@@ -178,8 +183,9 @@ class Database:
             address=r["address"],
             win_rate=r["win_rate"],
             avg_roi=r["avg_roi"],
-            consistency=r["consistency"],
-            recency_score=r["recency_score"],
+            sharpe_ratio=r["sharpe_ratio"],
+            sharpe_ci_lower=r["sharpe_ci_lower"],
+            sharpe_ci_upper=r["sharpe_ci_upper"],
             hold_ratio=r["hold_ratio"],
             resolved_market_count=r["resolved_market_count"],
             composite_score=r["composite_score"],

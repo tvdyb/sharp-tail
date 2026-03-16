@@ -8,6 +8,7 @@ import os
 import time
 import urllib.request
 import urllib.error
+import http.client
 from datetime import datetime, timedelta
 from statistics import mean, stdev
 
@@ -84,7 +85,7 @@ def _api_get(url: str, retries: int = 3) -> dict | list | None:
             req = urllib.request.Request(url, headers={"User-Agent": "polymir-backtest/1.0"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode())
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, http.client.IncompleteRead) as e:
             if attempt < retries - 1:
                 time.sleep(1 * (attempt + 1))
             else:
@@ -371,20 +372,31 @@ def _cache_to_objects(cache: dict):
                 total_sold = sum(t["size"] for t in sells)
                 net_position = total_bought - total_sold
 
-                if net_position <= 0:
-                    continue
+                if total_bought == 0:
+                    continue  # sell-only positions (no entry we can track)
 
                 # Weighted avg entry price
                 buy_cost = sum(t["price"] * t["size"] for t in buys)
                 avg_entry = buy_cost / total_bought if total_bought > 0 else 0.0
 
                 is_winner = (token_id == winner_token_id)
-                won = is_winner and net_position > 0
 
-                # ROI
-                payout = net_position * 1.0 if is_winner else 0.0
-                cost = net_position * avg_entry if avg_entry > 0 else 0.0
-                roi = (payout - cost) / cost if cost > 0 else 0.0
+                # held_to_expiration: kept >50% of position through resolution
+                exit_ratio = total_sold / total_bought if total_bought > 0 else 1.0
+                held_to_expiration = exit_ratio < 0.5
+
+                if net_position > 0:
+                    # Still holding — resolve based on outcome
+                    won = is_winner
+                    payout = net_position * 1.0 if is_winner else 0.0
+                    cost = net_position * avg_entry if avg_entry > 0 else 0.0
+                    roi = (payout - cost) / cost if cost > 0 else 0.0
+                else:
+                    # Sold everything before resolution — compute realized P&L
+                    sell_revenue = sum(t["price"] * t["size"] for t in sells)
+                    cost = buy_cost
+                    roi = (sell_revenue - cost) / cost if cost > 0 else 0.0
+                    won = roi > 0
 
                 key = f"{wallet}_{cid}_{token_id}"
                 if wallet not in wallet_market_positions:
@@ -393,7 +405,7 @@ def _cache_to_objects(cache: dict):
                     "market_id": cid,
                     "won": won,
                     "roi": roi,
-                    "held_to_expiration": net_position > 0,
+                    "held_to_expiration": held_to_expiration,
                     "total_bought": total_bought,
                     "total_sold": total_sold,
                     "resolution_date": res_date,
@@ -656,8 +668,8 @@ def build_pdf(
     elements.append(Paragraph("&bull; <b>Step 1 — Discover:</b> Scan all historically resolved Polymarket markets. "
         "For each market, fetch every trade by wallet address. Reconstruct who held what at expiration and "
         "whether they won or lost.", bullet))
-    elements.append(Paragraph("&bull; <b>Step 2 — Score:</b> Score each wallet with a composite formula "
-        "(win rate, ROI, consistency, recency, hold ratio). Rank the top wallets.", bullet))
+    elements.append(Paragraph("&bull; <b>Step 2 — Score:</b> Compute per-wallet Sharpe ratio on held-to-expiration "
+        "positions. Use the lower 95% CI bound as the rating — rewards both high returns and long track records.", bullet))
     elements.append(Paragraph("&bull; <b>Step 3 — Monitor:</b> Watch the top-ranked wallets in real time via "
         "WebSocket feed and polling. When a sharp wallet buys a contract, we get a signal.", bullet))
     elements.append(Paragraph("&bull; <b>Step 4 — Validate:</b> Before copying the trade, check the orderbook. "
@@ -696,26 +708,27 @@ def build_pdf(
         "short-term flippers are excluded.", body))
     elements.append(Spacer(1, 10))
 
-    elements.append(Paragraph("<b>Composite scoring formula</b>", body))
+    elements.append(Paragraph("<b>Sharpe CI rating</b>", body))
     elements.append(Paragraph(
-        "Each wallet receives a score from 0 to 1, computed as a weighted sum of five components:", body))
+        "Each wallet is rated by the <b>lower bound of the 95% confidence interval</b> on its "
+        "per-market Sharpe ratio (mean ROI / stdev ROI), computed on held-to-expiration positions only. "
+        "This single metric naturally captures:", body))
     elements.append(Spacer(1, 6))
 
     score_data = [
-        ["Component", "Weight", "What it measures", "Formula"],
-        ["Win Rate", "30%", "Prediction accuracy", "wins / total_markets"],
-        ["ROI", "25%", "Profitability per market",
-         "sigmoid(avg_roi * 5), normalized to [0,1]"],
-        ["Consistency", "20%", "Steady vs. volatile returns",
-         "1 / (1 + stdev(roi) / |mean(roi)|)"],
-        ["Recency", "15%", "Recent performance weighted more",
-         "exp(-ln2/90d * age) * outcome, averaged"],
-        ["Hold Ratio", "10%", "Conviction: holds to expiration",
-         "held_count / total_markets"],
+        ["What it rewards", "How"],
+        ["High risk-adjusted returns", "Higher Sharpe → higher CI lower bound"],
+        ["Consistency", "Lower volatility → higher Sharpe"],
+        ["Long track record", "More markets → tighter CI → higher floor"],
+        ["Conviction (hold to expiration)", "Hard filter: ≥70% hold ratio required"],
     ]
-    st = Table(score_data, colWidths=[1.1 * inch, 0.6 * inch, 1.8 * inch, 3 * inch])
+    st = Table(score_data, colWidths=[2.2 * inch, 4.3 * inch])
     st.setStyle(_std_table_style("#4CAF50", "#E8F5E9"))
     elements.append(st)
+    elements.append(Spacer(1, 6))
+    elements.append(Paragraph(
+        "<b>Formula:</b> SE(Sharpe) = sqrt((1 + Sharpe²/2) / n); "
+        "Rating = Sharpe - 1.96 × SE", body))
 
     elements.append(Spacer(1, 8))
     elements.append(Paragraph(
@@ -912,12 +925,8 @@ def build_pdf(
     cfg_data = [
         ["Parameter", "Value", "Description"],
         ["Scoring: min_resolved_markets", "5", "Min markets for wallet qualification"],
-        ["Scoring: recency_half_life_days", "90", "Decay half-life for recency weighting"],
-        ["Scoring: win_rate_weight", "0.30", "Weight of win rate in composite score"],
-        ["Scoring: roi_weight", "0.25", "Weight of normalized ROI"],
-        ["Scoring: consistency_weight", "0.20", "Weight of consistency metric"],
-        ["Scoring: recency_weight", "0.15", "Weight of recency score"],
-        ["Scoring: hold_ratio_weight", "0.10", "Weight of hold-to-expiration ratio"],
+        ["Scoring: ci_confidence", "0.95", "Confidence level for Sharpe CI (lower bound = rating)"],
+        ["Scoring: min_hold_ratio", "0.70", "Minimum hold-to-expiration ratio to qualify"],
         ["Execution: max_slippage_pct", "5%", "Max allowed slippage per trade"],
         ["Execution: max_spread_pct", "10%", "Max bid-ask spread to trade"],
         ["Execution: min_liquidity_usd", "$0", "Min orderbook depth required"],
@@ -959,7 +968,7 @@ def build_pdf(
         ["Sortino Ratio", f"{result.sortino_ratio:.2f}"],
         ["Max Drawdown", f"${result.max_drawdown:,.2f}"],
         ["Max DD Duration", f"{result.max_drawdown_duration} trades"],
-        ["Avg Est. Slippage", f"{result.avg_estimated_slippage:.4f}"],
+        ["Slippage/Trade", "$0.03 (flat per trade)"],
         ["Trading Fees", "$0 (Polymarket has zero fees)"],
     ]
     t = Table(metrics_data, colWidths=[2.5 * inch, 2.5 * inch])

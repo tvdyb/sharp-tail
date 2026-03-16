@@ -217,7 +217,8 @@ class TestBacktestEngine:
         # Market M1 resolved 10 days ago, M2 resolved 5 days ago
         wallet_results = [
             WalletMarketResult(
-                wallet="good_wallet", market_id=f"m{i}", won=True, roi=0.5,
+                wallet="good_wallet", market_id=f"m{i}", won=True,
+                roi=0.4 + 0.05 * i,  # vary ROIs so stdev > 0
                 held_to_expiration=True, total_bought=100, total_sold=0,
                 resolution_date=now - timedelta(days=10 - i),
             )
