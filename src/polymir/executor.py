@@ -25,9 +25,10 @@ logger = structlog.get_logger()
 class MirrorExecutor:
     """Processes trade signals and executes mirror trades with safety checks."""
 
-    def __init__(self, config: AppConfig, db: Database) -> None:
+    def __init__(self, config: AppConfig, db: Database, dry_run: bool = False) -> None:
         self._config = config
         self._db = db
+        self._dry_run = dry_run
 
     async def run(self) -> None:
         """Start monitor and process signals as they arrive."""
@@ -35,7 +36,21 @@ class MirrorExecutor:
         # Run monitor and executor concurrently
         monitor_task = asyncio.create_task(monitor.run())
         try:
-            async with ClobClient(self._config.api) as clob:
+            # Use LiveClobClient (py-clob-client SDK) when a private key is set,
+            # otherwise fall back to the lightweight ClobClient.
+            if self._config.api.private_key:
+                from polymir.live_client import LiveClobClient
+                clob_ctx = LiveClobClient(self._config.api)
+            else:
+                clob_ctx = ClobClient(self._config.api)
+
+            async with clob_ctx as clob:
+                logger.info(
+                    "executor_started",
+                    dry_run=self._dry_run,
+                    fixed_size=self._config.execution.fixed_size_contracts,
+                    client=type(clob).__name__,
+                )
                 while True:
                     signal = await monitor.signal_queue.get()
                     await self._process_signal(signal, clob)
@@ -101,7 +116,23 @@ class MirrorExecutor:
         # Compute order price with aggression
         order_price = self._compute_price(book, signal.side, exec_cfg.aggression)
 
-        # Place order
+        # Place order (or log-only in dry-run mode)
+        if self._dry_run:
+            log.info(
+                "dry_run_would_trade",
+                price=order_price,
+                size=order_size,
+                estimated_slippage=estimated_slippage,
+            )
+            return await self._record(
+                signal,
+                MirrorDecision.EXECUTE,
+                order_price=order_price,
+                order_size=order_size,
+                estimated_slippage=estimated_slippage,
+                metadata={"dry_run": True},
+            )
+
         try:
             result = await clob.place_order(
                 token_id=signal.asset_id,
@@ -157,7 +188,14 @@ class MirrorExecutor:
     def _compute_size(
         signal: TradeSignal, book: OrderBook, exec_cfg: Any
     ) -> float:
-        """Scale order size by liquidity and cap at max position."""
+        """Compute order size.
+
+        If fixed_size_contracts is set, use that directly.
+        Otherwise, scale by liquidity and cap at max position.
+        """
+        if exec_cfg.fixed_size_contracts is not None:
+            return exec_cfg.fixed_size_contracts
+
         total_liq = book.total_liquidity()
         # Scale: use at most 10% of available liquidity
         liq_scaled = min(signal.size, total_liq * 0.10 / (signal.price or 1.0))

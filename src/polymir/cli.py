@@ -55,16 +55,46 @@ def monitor(top: int) -> None:
 
 
 @main.command()
-def trade() -> None:
+@click.option("--size", default=None, type=float, help="Fixed contract size per trade (e.g. 1.0)")
+@click.option("--dry-run", is_flag=True, help="Log signals without placing orders")
+def trade(size: float | None, dry_run: bool) -> None:
     """Start live mirror execution."""
     async def _run() -> None:
         from polymir.executor import MirrorExecutor
-        from polymir.config import AppConfig
+        from polymir.config import AppConfig, ExecutionConfig
         from polymir.db import Database
 
         config = AppConfig.from_env()
+
+        # Override fixed size if provided
+        if size is not None:
+            config = AppConfig(
+                api=config.api,
+                scoring=config.scoring,
+                execution=ExecutionConfig(
+                    stale_signal_timeout_s=config.execution.stale_signal_timeout_s,
+                    fill_timeout_s=config.execution.fill_timeout_s,
+                    aggression=config.execution.aggression,
+                    max_position_usd=config.execution.max_position_usd,
+                    poll_interval_s=config.execution.poll_interval_s,
+                    fee_rate=config.execution.fee_rate,
+                    signal_sides=config.execution.signal_sides,
+                    slippage_per_trade=config.execution.slippage_per_trade,
+                    fixed_size_contracts=size,
+                    max_slippage_pct=config.execution.max_slippage_pct,
+                    max_spread_pct=config.execution.max_spread_pct,
+                    min_liquidity_usd=config.execution.min_liquidity_usd,
+                ),
+                db_path=config.db_path,
+                top_wallets=config.top_wallets,
+                log_level=config.log_level,
+            )
+
+        if dry_run:
+            click.echo("DRY RUN — signals will be logged but no orders placed")
+
         async with Database(config.db_path) as db:
-            executor = MirrorExecutor(config, db)
+            executor = MirrorExecutor(config, db, dry_run=dry_run)
             await executor.run()
 
     asyncio.run(_run())

@@ -16,6 +16,8 @@ class APIConfig:
     api_key: str = ""
     api_secret: str = ""
     api_passphrase: str = ""
+    private_key: str = ""  # Ethereum private key for signing CLOB orders
+    chain_id: int = 137  # Polygon mainnet
     rate_limit_per_second: float = 5.0
     request_timeout: float = 30.0
     max_retries: int = 5
@@ -28,6 +30,7 @@ class APIConfig:
             api_key=os.environ.get("POLYMARKET_API_KEY", ""),
             api_secret=os.environ.get("POLYMARKET_API_SECRET", ""),
             api_passphrase=os.environ.get("POLYMARKET_API_PASSPHRASE", ""),
+            private_key=os.environ.get("POLYMARKET_PRIVATE_KEY", ""),
         )
 
 
@@ -61,6 +64,7 @@ class ExecutionConfig:
     fee_rate: float = 0.0  # Polymarket has no trading fees
     signal_sides: tuple[str, ...] = ("BUY",)  # sides to signal on; add "SELL" to include exits
     slippage_per_trade: float = 0.03  # flat 3 cent slippage from mid per trade
+    fixed_size_contracts: float | None = None  # if set, use flat contract sizing instead of liquidity-based
     # Live executor orderbook checks (not used in backtest)
     max_slippage_pct: float = 0.02
     max_spread_pct: float = 0.03
